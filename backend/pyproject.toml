@@ -1,0 +1,23 @@
+[project]
+name = "loan-eligibility-engine-backend"
+version = "1.0.0"
+description = "FastAPI backend and ingestion services for the Loan Eligibility Engine"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "boto3==1.35.36",
+    "fastapi==0.115.0",
+    "psycopg[binary]==3.2.3",
+    "pydantic==2.9.2",
+    "uvicorn==0.31.1",
+]
+
+[dependency-groups]
+test = [
+    "httpx==0.27.2",
+    "pytest==8.3.3",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["../tests/backend"]
+pythonpath = [".."]
+addopts = "-q"

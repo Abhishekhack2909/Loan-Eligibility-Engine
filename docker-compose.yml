@@ -1,0 +1,270 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: loan_engine
+      POSTGRES_USER: loan_engine
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-loan_engine_local}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations/001_initial.sql:/docker-entrypoint-initdb.d/001_initial.sql:ro
+    ports:
+      # 5432 is commonly occupied by an existing local PostgreSQL service.
+      # Containers still use postgres:5432; host tools use localhost:15432.
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U loan_engine -d loan_engine"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    # The upstream Docker Hub repository is no longer published under the
+    # historical minio/minio name. This pinned community image contains the
+    # MinIO server binary and keeps the local S3-compatible test stack
+    # reproducible without requiring a registry login.
+    image: elestio/minio@sha256:25348a257f1ece1b192f25f6cd9854618fa86422ac87b494b5d4e629c556d4bd
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      # This is intentionally a webhook target. The event-router forwards the
+      # event to LocalStack SQS; MinIO is not configured to write to SQS.
+      MINIO_NOTIFY_WEBHOOK_ENABLE_PRIMARY: "on"
+      MINIO_NOTIFY_WEBHOOK_ENDPOINT_PRIMARY: http://event-router:8091/events/minio
+    volumes:
+      - minio-data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio-bootstrap:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "local/minio_bootstrap.py"]
+    depends_on:
+      minio:
+        condition: service_healthy
+      event-router:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-loan-uploads}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      MINIO_WEBHOOK_ARN: arn:minio:sqs::PRIMARY:webhook
+    restart: "no"
+
+  localstack:
+    image: localstack/localstack:3.7
+    environment:
+      SERVICES: sqs
+      EVENT_QUEUE_NAME: ${EVENT_QUEUE_NAME:-loan-eligibility-events}
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      DEBUG: ${LOCALSTACK_DEBUG:-0}
+    volumes:
+      - localstack-data:/var/lib/localstack
+      - ./local/localstack-init.sh:/etc/localstack/init/ready.d/10-loan-engine.sh:ro
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -fs http://localhost:4566/_localstack/health | grep -q 'sqs'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  event-router:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "local/event_router.py"]
+    environment:
+      EVENT_ROUTER_PORT: "8091"
+      EVENT_QUEUE_NAME: ${EVENT_QUEUE_NAME:-loan-eligibility-events}
+      LOCALSTACK_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+    depends_on:
+      localstack:
+        condition: service_healthy
+    ports:
+      - "8091:8091"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8091/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  ingestion-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "local/ingestion_worker.py"]
+    environment:
+      DATABASE_DSN: postgresql://loan_engine:${POSTGRES_PASSWORD:-loan_engine_local}@postgres:5432/loan_engine
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-loan-uploads}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      EVENT_QUEUE_NAME: ${EVENT_QUEUE_NAME:-loan-eligibility-events}
+      LOCALSTACK_ENDPOINT_URL: http://localstack:4566
+      AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-test}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-test}
+      # Service-to-service URLs deliberately ignore host-oriented .env values.
+      N8N_WEBHOOK_URL: http://n8n:5678/webhook/loan-ingestion-completed
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-local-n8n-webhook-secret}
+      N8N_WEBHOOK_TIMEOUT_SECONDS: ${N8N_WEBHOOK_TIMEOUT_SECONDS:-10}
+      INGESTION_BATCH_SIZE: ${INGESTION_BATCH_SIZE:-500}
+      WORKER_HEALTH_PORT: "8092"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-bootstrap:
+        condition: service_completed_successfully
+      localstack:
+        condition: service_healthy
+      n8n:
+        condition: service_healthy
+    ports:
+      - "8092:8092"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8092/health', timeout=2)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_DSN: postgresql://loan_engine:${POSTGRES_PASSWORD:-loan_engine_local}@postgres:5432/loan_engine
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-loan-uploads}
+      S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      N8N_COMPLETION_WEBHOOK_URL: http://n8n:5678/webhook/loan-ingestion-completed
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-local-n8n-webhook-secret}
+    command: ["uvicorn", "backend.app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-bootstrap:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  llm-stub:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: ["python", "llm_stub/server.py"]
+    environment:
+      LLM_STUB_PORT: "8090"
+    ports:
+      - "8090:8090"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8090/health', timeout=2)"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  mailpit:
+    image: axllent/mailpit:v1.20
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8025/api/v1/info"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  n8n:
+    image: n8nio/n8n:1.67.1
+    entrypoint: ["tini", "--"]
+    command: ["node", "/data/n8n-bootstrap.js"]
+    environment:
+      N8N_HOST: ${N8N_HOST:-n8n}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      N8N_SECURE_COOKIE: "false"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      N8N_RUNNERS_ENABLED: "true"
+      NODE_FUNCTION_ALLOW_BUILTIN: crypto
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:-local-n8n-encryption-key-change-me}
+      N8N_USER_MANAGEMENT_DISABLED: "true"
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-loan_engine_local}
+      N8N_WEBHOOK_SECRET: ${N8N_WEBHOOK_SECRET:-local-n8n-webhook-secret}
+      LOAN_SOURCE_MODE: ${LOAN_SOURCE_MODE:-fixture}
+      LLM_STUB_URL: http://llm-stub:8090
+      LLM_MODE: ${LLM_MODE:-stub}
+      LLM_API_BASE_URL: ${LLM_API_BASE_URL:-http://host.docker.internal:11434/v1}
+      LLM_MODEL: ${LLM_MODEL:-local-model}
+      DEMO_RECIPIENTS: ${DEMO_RECIPIENTS:-demo@example.test}
+      MAIL_DELIVERY_MODE: ${MAIL_DELIVERY_MODE:-mailpit}
+      MAILPIT_API_URL: http://mailpit:8025/api/v1/send
+      AWS_SES_ENABLED: ${AWS_SES_ENABLED:-false}
+      AWS_SES_CREDENTIAL_NAME: ${AWS_SES_CREDENTIAL_NAME:-AWS SES (configure in n8n)}
+      AWS_SES_FROM: ${AWS_SES_FROM:-}
+      DEMO_NOTIFICATION_TOKEN: ${DEMO_NOTIFICATION_TOKEN:-local-demo-notification-token}
+      N8N_POSTGRES_CREDENTIAL_NAME: ${N8N_POSTGRES_CREDENTIAL_NAME:-Postgres local (configure in n8n)}
+      WORKFLOW_C_ID: ${WORKFLOW_C_ID:-loan-eligibility-email-delivery}
+      N8N_CATALOG_READY_WEBHOOK_URL: http://n8n:5678/webhook/loan-catalog-ready
+      N8N_PROVISION_MARKER: /home/node/.n8n/.loan-engine-provisioned-v1
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./n8n:/data/workflows:ro
+      - ./local/n8n-bootstrap.js:/data/n8n-bootstrap.js:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      llm-stub:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+    ports:
+      - "5678:5678"
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /home/node/.n8n/.loan-engine-provisioned-v1 && wget -qO- http://127.0.0.1:5678/healthz >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
+  web:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./web:/usr/share/nginx/html:ro
+      - ./web/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  postgres-data:
+  minio-data:
+  localstack-data:
+  n8n-data:

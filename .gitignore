@@ -1,0 +1,40 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# Node and Serverless tooling
+node_modules/
+.serverless/
+.npx/
+serverless-state.json
+aws-build/
+
+# Local services and generated artifacts
+local/.data/
+local/volumes/
+llm_stub/.cache/
+*.log
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local assistant/session notes
+session-*.md

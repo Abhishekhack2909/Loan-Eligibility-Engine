@@ -1,0 +1,29 @@
+{
+  "event_id": "demo-notification-25d0cf35-001-002",
+  "event_type": "matches.completed",
+  "status": "completed",
+  "demo_only": true,
+  "demo_token": "local-demo-notification-token",
+  "upload_batch_id": "25d0cf35-a0f5-4446-88ce-06c90bc746ac",
+  "presentation_limit": 10,
+  "metrics": {
+    "naive": 30000,
+    "candidates": 30000,
+    "evaluated": 30000,
+    "stored": 30000,
+    "eligible": 30000,
+    "may_qualify": 0,
+    "unknown": 0,
+    "top_k_highlights": 2
+  },
+  "demo_targets": [
+    {
+      "user_id": "7ea16a7b-3c9c-42b8-b516-1f49cf23da24",
+      "recipient": "complexhat735+one@gmail.com"
+    },
+    {
+      "user_id": "de970308-d006-4368-9e6d-2d40ee0ea201",
+      "recipient": "complexhat735+two@gmail.com"
+    }
+  ]
+}

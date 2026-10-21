@@ -1,0 +1,580 @@
+service: loan-eligibility-engine
+frameworkVersion: '3'
+
+provider:
+  name: aws
+  runtime: python3.12
+  architecture: arm64
+  stage: ${opt:stage, 'sandbox'}
+  region: ${opt:region, 'us-east-1'}
+  memorySize: 512
+  timeout: 30
+  logRetentionInDays: 14
+  versionFunctions: true
+  environment:
+    APP_NAME: loan-eligibility-engine
+    S3_ENDPOINT_URL:
+      Fn::Sub: https://s3.${AWS::Region}.amazonaws.com
+    S3_REGION: { Ref: AWS::Region }
+    S3_BUCKET: { Ref: UploadsBucket }
+    DATABASE_SECRET_ARN: { Ref: DatabaseSecretArn }
+    N8N_WEBHOOK_SECRET_ARN: { Ref: N8nWebhookSecretArn }
+    N8N_COMPLETION_WEBHOOK_URL: { Ref: N8nCompletionWebhookUrl }
+    API_AUTH_TOKEN_SECRET_ARN: { Ref: ApiAuthTokenSecretArn }
+    WEB_ORIGIN: { Ref: WebOrigin }
+    RDS_MODE: { Ref: RdsMode }
+    RDS_ENDPOINT: { Ref: ExistingRdsEndpoint }
+    RDS_PORT: { Ref: ExistingRdsPort }
+    PRESIGNED_URL_EXPIRY_SECONDS: { Ref: PresignedUrlExpirySeconds }
+    INGESTION_BATCH_SIZE: { Ref: IngestionBatchSize }
+  vpc:
+    securityGroupIds:
+      - Ref: LambdaSecurityGroupId
+    subnetIds:
+      Ref: PrivateSubnetIds
+
+package:
+  patterns:
+    - backend/**
+    - scripts/**
+    - '!tests/**'
+    - '!docs/**'
+    - '!local/**'
+    - '!n8n/**'
+    - '!web/**'
+    - '!llm_stub/**'
+    - '!migrations/**'
+    - '!**/__pycache__/**'
+    - '!**/.pytest_cache/**'
+
+functions:
+  api:
+    handler: scripts/infra/lambda_handlers.api_handler
+    description: Optional upload/status HTTP API for the loan eligibility engine
+    memorySize: 512
+    timeout: 30
+    layers:
+      - Ref: PythonDependenciesLayerArn
+    role:
+      Fn::GetAtt:
+        - ApiLambdaRole
+        - Arn
+
+  ingestion:
+    handler: scripts/infra/lambda_handlers.ingestion_handler
+    description: Stream one uploaded CSV from SQS through the backend ingestion service
+    memorySize: 2048
+    timeout: 900
+    layers:
+      - Ref: PythonDependenciesLayerArn
+    role:
+      Fn::GetAtt:
+        - IngestionLambdaRole
+        - Arn
+    events:
+      - sqs:
+          arn:
+            Fn::GetAtt:
+              - IngestionQueue
+              - Arn
+          batchSize: 5
+          maximumBatchingWindow: 5
+          functionResponseType: ReportBatchItemFailures
+
+resources:
+  Parameters:
+    EnableApiRoutes:
+      Type: String
+      Default: ${param:EnableApiRoutes, 'false'}
+      AllowedValues:
+        - 'true'
+        - 'false'
+      Description: Set true only when the optional HTTP API routes have been approved.
+
+    UploadsBucketName:
+      Type: String
+      Default: ${param:UploadsBucketName, ''}
+      Description: Optional globally unique S3 bucket name. Leave blank for a generated name.
+
+    PythonDependenciesLayerArn:
+      Type: String
+      Default: ${param:PythonDependenciesLayerArn, ''}
+      Description: ARN of a Python 3.12 arm64 layer containing backend/requirements.txt dependencies.
+
+    DatabaseSecretArn:
+      Type: String
+      Default: ${param:DatabaseSecretArn, ''}
+      Description: Existing Secrets Manager ARN containing DATABASE_DSN as JSON or a plain secret string.
+
+    ApiAuthTokenSecretArn:
+      Type: String
+      Default: ${param:ApiAuthTokenSecretArn, ''}
+      Description: Existing Secrets Manager ARN containing API_AUTH_TOKEN for the optional browser API.
+
+    N8nWebhookSecretArn:
+      Type: String
+      Default: ${param:N8nWebhookSecretArn, ''}
+      Description: Existing Secrets Manager ARN containing N8N_WEBHOOK_SECRET as JSON or a plain secret string.
+
+    SecretsKmsKeyArn:
+      Type: String
+      Default: ${param:SecretsKmsKeyArn, ''}
+      Description: Optional customer-managed KMS key ARN used by the two application secrets.
+
+    N8nCompletionWebhookUrl:
+      Type: String
+      Default: ${param:N8nCompletionWebhookUrl, ''}
+      Description: Absolute HTTPS n8n completion webhook URL; leave blank when n8n is local-only.
+
+    WebOrigin:
+      Type: String
+      Default: ${param:WebOrigin, 'http://localhost:8080'}
+      Description: Browser origin allowed to call the upload API and S3 presigned upload.
+
+    RdsMode:
+      Type: String
+      Default: existing
+      AllowedValues:
+        - existing
+      Description: This stack uses an existing private PostgreSQL/RDS deployment.
+
+    ExistingRdsEndpoint:
+      Type: String
+      Default: ${param:ExistingRdsEndpoint, ''}
+      Description: Existing private RDS endpoint, recorded for the runtime adapter and operations.
+
+    ExistingRdsPort:
+      Type: Number
+      Default: 5432
+      MinValue: 1
+      MaxValue: 65535
+
+    PrivateSubnetIds:
+      Type: List<AWS::EC2::Subnet::Id>
+      Default: ${param:PrivateSubnetIds, ''}
+      Description: Private subnet IDs shared by the Lambda functions and existing RDS network path.
+
+    LambdaSecurityGroupId:
+      Type: AWS::EC2::SecurityGroup::Id
+      Default: ${param:LambdaSecurityGroupId, ''}
+      Description: Security group allowing Lambda to reach PostgreSQL on the configured port.
+
+    PresignedUrlExpirySeconds:
+      Type: Number
+      Default: 900
+      MinValue: 1
+      MaxValue: 86400
+
+    IngestionBatchSize:
+      Type: Number
+      Default: 500
+      MinValue: 1
+      MaxValue: 5000
+
+  Conditions:
+    EnableApiRoutesCondition:
+      Fn::Equals:
+        - Ref: EnableApiRoutes
+        - 'true'
+    HasUploadsBucketName:
+      Fn::Not:
+        - Fn::Equals:
+            - Ref: UploadsBucketName
+            - ''
+    HasDatabaseSecret:
+      Fn::Not:
+        - Fn::Equals:
+            - Ref: DatabaseSecretArn
+            - ''
+    HasApiAuthTokenSecret:
+      Fn::Not:
+        - Fn::Equals:
+            - Ref: ApiAuthTokenSecretArn
+            - ''
+    HasN8nWebhookSecret:
+      Fn::Not:
+        - Fn::Equals:
+            - Ref: N8nWebhookSecretArn
+            - ''
+    HasSecretsKmsKey:
+      Fn::Not:
+        - Fn::Equals:
+            - Ref: SecretsKmsKeyArn
+            - ''
+
+  Resources:
+    ApiLambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName:
+          Fn::Sub: ${AWS::StackName}-api
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: api-runtime
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource:
+                    Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*
+                - Effect: Allow
+                  Action:
+                    - ec2:CreateNetworkInterface
+                    - ec2:DescribeNetworkInterfaces
+                    - ec2:DeleteNetworkInterface
+                    - ec2:DescribeSubnets
+                    - ec2:AssignPrivateIpAddresses
+                    - ec2:UnassignPrivateIpAddresses
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - s3:PutObject
+                  Resource:
+                    Fn::Sub: arn:${AWS::Partition}:s3:::${UploadsBucket}/uploads/*
+                - !If
+                  - HasDatabaseSecret
+                  - Effect: Allow
+                    Action:
+                      - secretsmanager:GetSecretValue
+                    Resource: { Ref: DatabaseSecretArn }
+                  - Ref: AWS::NoValue
+                - !If
+                  - HasApiAuthTokenSecret
+                  - Effect: Allow
+                    Action:
+                      - secretsmanager:GetSecretValue
+                    Resource: { Ref: ApiAuthTokenSecretArn }
+                  - Ref: AWS::NoValue
+                - !If
+                  - HasN8nWebhookSecret
+                  - Effect: Allow
+                    Action:
+                      - secretsmanager:GetSecretValue
+                    Resource: { Ref: N8nWebhookSecretArn }
+                  - Ref: AWS::NoValue
+                - !If
+                  - HasSecretsKmsKey
+                  - Effect: Allow
+                    Action:
+                      - kms:Decrypt
+                    Resource: { Ref: SecretsKmsKeyArn }
+                  - Ref: AWS::NoValue
+
+    IngestionLambdaRole:
+      Type: AWS::IAM::Role
+      Properties:
+        RoleName:
+          Fn::Sub: ${AWS::StackName}-ingestion
+        AssumeRolePolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Principal:
+                Service: lambda.amazonaws.com
+              Action: sts:AssumeRole
+        Policies:
+          - PolicyName: ingestion-runtime
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - logs:CreateLogGroup
+                    - logs:CreateLogStream
+                    - logs:PutLogEvents
+                  Resource:
+                    Fn::Sub: arn:${AWS::Partition}:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-*
+                - Effect: Allow
+                  Action:
+                     - ec2:CreateNetworkInterface
+                     - ec2:DescribeNetworkInterfaces
+                     - ec2:DeleteNetworkInterface
+                     - ec2:DescribeSubnets
+                     - ec2:AssignPrivateIpAddresses
+                     - ec2:UnassignPrivateIpAddresses
+                  Resource: '*'
+                - Effect: Allow
+                  Action:
+                    - s3:GetObject
+                    - s3:GetObjectVersion
+                  Resource:
+                    Fn::Sub: arn:${AWS::Partition}:s3:::${UploadsBucket}/uploads/*
+                - Effect: Allow
+                  Action:
+                    - sqs:ReceiveMessage
+                    - sqs:DeleteMessage
+                    - sqs:GetQueueAttributes
+                    - sqs:ChangeMessageVisibility
+                  Resource:
+                    Fn::GetAtt:
+                      - IngestionQueue
+                      - Arn
+                - !If
+                  - HasDatabaseSecret
+                  - Effect: Allow
+                    Action:
+                      - secretsmanager:GetSecretValue
+                    Resource: { Ref: DatabaseSecretArn }
+                  - Ref: AWS::NoValue
+                - !If
+                  - HasN8nWebhookSecret
+                  - Effect: Allow
+                    Action:
+                      - secretsmanager:GetSecretValue
+                    Resource: { Ref: N8nWebhookSecretArn }
+                  - Ref: AWS::NoValue
+                - !If
+                  - HasSecretsKmsKey
+                  - Effect: Allow
+                    Action:
+                      - kms:Decrypt
+                    Resource: { Ref: SecretsKmsKeyArn }
+                  - Ref: AWS::NoValue
+
+    UploadsBucket:
+      Type: AWS::S3::Bucket
+      Properties:
+        BucketName:
+          Fn::If:
+            - HasUploadsBucketName
+            - Ref: UploadsBucketName
+            - Fn::Sub: ${AWS::StackName}-${AWS::AccountId}-uploads
+        BucketEncryption:
+          ServerSideEncryptionConfiguration:
+            - ServerSideEncryptionByDefault:
+                SSEAlgorithm: AES256
+        NotificationConfiguration:
+          EventBridgeConfiguration:
+            EventBridgeEnabled: true
+        OwnershipControls:
+          Rules:
+            - ObjectOwnership: BucketOwnerEnforced
+        PublicAccessBlockConfiguration:
+          BlockPublicAcls: true
+          BlockPublicPolicy: true
+          IgnorePublicAcls: true
+          RestrictPublicBuckets: true
+        CorsConfiguration:
+          CorsRules:
+            - AllowedOrigins:
+                - Ref: WebOrigin
+              AllowedMethods:
+                - PUT
+                - GET
+                - HEAD
+              AllowedHeaders:
+                - '*'
+              ExposedHeaders:
+                - ETag
+        VersioningConfiguration:
+          Status: Enabled
+        LifecycleConfiguration:
+          Rules:
+            - Id: ExpireUploadedObjects
+              Status: Enabled
+              ExpirationInDays: 30
+              NoncurrentVersionExpiration:
+                NoncurrentDays: 7
+      DeletionPolicy: Retain
+      UpdateReplacePolicy: Retain
+
+    IngestionDeadLetterQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        MessageRetentionPeriod: 1209600
+        SqsManagedSseEnabled: true
+
+    IngestionQueue:
+      Type: AWS::SQS::Queue
+      Properties:
+        VisibilityTimeout: 960
+        MessageRetentionPeriod: 345600
+        SqsManagedSseEnabled: true
+        RedrivePolicy:
+          deadLetterTargetArn:
+            Fn::GetAtt:
+              - IngestionDeadLetterQueue
+              - Arn
+          maxReceiveCount: 5
+
+    IngestionQueuePolicy:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues:
+          - Ref: IngestionQueue
+        PolicyDocument:
+          Version: '2012-10-17'
+          Statement:
+            - Sid: AllowS3ObjectCreatedRule
+              Effect: Allow
+              Principal:
+                Service: events.amazonaws.com
+              Action: sqs:SendMessage
+              Resource:
+                Fn::GetAtt:
+                  - IngestionQueue
+                  - Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn:
+                    Fn::GetAtt:
+                      - S3ObjectCreatedRule
+                      - Arn
+
+    S3ObjectCreatedRule:
+      Type: AWS::Events::Rule
+      Properties:
+        Description: Route uploaded CSV object-created events to the ingestion queue.
+        EventPattern:
+          source:
+            - aws.s3
+          detail-type:
+            - Object Created
+          detail:
+            bucket:
+              name:
+                - Ref: UploadsBucket
+            object:
+              key:
+                - prefix: uploads/
+        State: ENABLED
+        Targets:
+          - Id: IngestionQueueTarget
+            Arn:
+              Fn::GetAtt:
+                - IngestionQueue
+                - Arn
+
+    ApiHttpApi:
+      Type: AWS::ApiGatewayV2::Api
+      Condition: EnableApiRoutesCondition
+      Properties:
+        Name:
+          Fn::Sub: ${AWS::StackName}-http
+        ProtocolType: HTTP
+        DisableExecuteApiEndpoint: false
+        CorsConfiguration:
+          AllowOrigins:
+            - Ref: WebOrigin
+          AllowMethods:
+            - GET
+            - POST
+            - OPTIONS
+          AllowHeaders:
+            - content-type
+            - x-api-key
+
+    ApiHttpIntegration:
+      Type: AWS::ApiGatewayV2::Integration
+      Condition: EnableApiRoutesCondition
+      Properties:
+        ApiId:
+          Ref: ApiHttpApi
+        IntegrationType: AWS_PROXY
+        IntegrationMethod: POST
+        PayloadFormatVersion: '2.0'
+        IntegrationUri:
+          Fn::Sub:
+            - arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${ApiFunctionArn}/invocations
+            - ApiFunctionArn:
+                Fn::GetAtt:
+                  - ApiLambdaFunction
+                  - Arn
+
+    ApiHealthRoute:
+      Type: AWS::ApiGatewayV2::Route
+      Condition: EnableApiRoutesCondition
+      Properties:
+        ApiId:
+          Ref: ApiHttpApi
+        RouteKey: GET /health
+        Target:
+          Fn::Join:
+            - ''
+            - - integrations/
+              - Ref: ApiHttpIntegration
+
+    ApiCreateUploadRoute:
+      Type: AWS::ApiGatewayV2::Route
+      Condition: EnableApiRoutesCondition
+      Properties:
+        ApiId:
+          Ref: ApiHttpApi
+        RouteKey: POST /uploads
+        Target:
+          Fn::Join:
+            - ''
+            - - integrations/
+              - Ref: ApiHttpIntegration
+
+    ApiGetUploadRoute:
+      Type: AWS::ApiGatewayV2::Route
+      Condition: EnableApiRoutesCondition
+      Properties:
+        ApiId:
+          Ref: ApiHttpApi
+        RouteKey: GET /uploads/{upload_id}
+        Target:
+          Fn::Join:
+            - ''
+            - - integrations/
+              - Ref: ApiHttpIntegration
+
+    ApiHttpStage:
+      Type: AWS::ApiGatewayV2::Stage
+      Condition: EnableApiRoutesCondition
+      Properties:
+        ApiId:
+          Ref: ApiHttpApi
+        StageName: '$default'
+        AutoDeploy: true
+
+    ApiLambdaInvokePermission:
+      Type: AWS::Lambda::Permission
+      Condition: EnableApiRoutesCondition
+      Properties:
+        Action: lambda:InvokeFunction
+        FunctionName:
+          Ref: ApiLambdaFunction
+        Principal: apigateway.amazonaws.com
+        SourceArn:
+          Fn::Sub: arn:${AWS::Partition}:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiHttpApi}/*/*
+
+  Outputs:
+    UploadsBucketName:
+      Description: Private S3 bucket for CSV uploads.
+      Value:
+        Ref: UploadsBucket
+    IngestionQueueUrl:
+      Description: Main SQS queue receiving S3 object-created events.
+      Value:
+        Ref: IngestionQueue
+    IngestionDeadLetterQueueUrl:
+      Description: DLQ for messages that exceed the ingestion retry limit.
+      Value:
+        Ref: IngestionDeadLetterQueue
+    S3ObjectCreatedRuleArn:
+      Description: EventBridge rule ARN for S3 object-created events.
+      Value:
+        Fn::GetAtt:
+          - S3ObjectCreatedRule
+          - Arn
+    ApiEndpoint:
+      Description: Optional HTTP API endpoint; disabled unless EnableApiRoutes is true.
+      Value:
+        Fn::If:
+          - EnableApiRoutesCondition
+          - Fn::GetAtt:
+              - ApiHttpApi
+              - ApiEndpoint
+          - disabled

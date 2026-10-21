@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Loan Eligibility Engine</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">LOAN ELIGIBILITY WORKFLOW CONSOLE</p>
+        <h1>Upload a borrower CSV</h1>
+        <p class="lede">The browser requests a short-lived presigned object URL, uploads the CSV directly to object storage, and waits for asynchronous ingestion to finish.</p>
+      </section>
+
+      <section class="card" aria-labelledby="upload-heading">
+        <h2 id="upload-heading">Start ingestion</h2>
+        <form id="upload-form">
+          <label for="csv-file">CSV file</label>
+          <input id="csv-file" name="csv-file" type="file" accept=".csv,text/csv" required>
+          <button id="upload-button" type="submit">Request URL &amp; upload</button>
+        </form>
+        <div id="status" class="status" role="status" aria-live="polite">Choose a CSV to begin.</div>
+        <pre id="result" class="result" hidden></pre>
+      </section>
+
+      <section class="card note">
+        <h2>Expected columns</h2>
+        <code>user_id, name, email, monthly_income, credit_score, employment_status, age</code>
+      </section>
+    </main>
+    <script src="/app.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,153 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Loan Eligibility Engine Architecture",
+    "output": "docs/architecture.html",
+    "locale": "en",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "operator",
+      "type": "external",
+      "label": "Operator / client",
+      "sublabel": "upload + status",
+      "pos": [30, 275],
+      "size": [140, 64]
+    },
+    {
+      "id": "api",
+      "type": "backend",
+      "label": "Optional API Lambda",
+      "sublabel": "health + presigned upload",
+      "pos": [235, 275],
+      "size": [160, 68]
+    },
+    {
+      "id": "uploads",
+      "type": "cloud",
+      "label": "Private S3 bucket",
+      "sublabel": "uploads/{uuid}/...",
+      "pos": [470, 120],
+      "size": [160, 68]
+    },
+    {
+      "id": "eventbridge",
+      "type": "cloud",
+      "label": "S3 object-created rule",
+      "sublabel": "uploads/ prefix",
+      "pos": [705, 120],
+      "size": [175, 68]
+    },
+    {
+      "id": "queue",
+      "type": "messagebus",
+      "label": "SQS + DLQ",
+      "sublabel": "retry + partial batch",
+      "pos": [955, 120],
+      "size": [150, 68]
+    },
+    {
+      "id": "ingestion",
+      "type": "backend",
+      "label": "Ingestion Lambda",
+      "sublabel": "stream + batch + idempotency",
+      "pos": [955, 325],
+      "size": [180, 72]
+    },
+    {
+      "id": "postgres",
+      "type": "database",
+      "label": "Existing PostgreSQL / RDS",
+      "sublabel": "users + matches + runs",
+      "pos": [1230, 325],
+      "size": [190, 72]
+    },
+    {
+      "id": "n8n",
+      "type": "external",
+      "label": "n8n Workflows A/B/C",
+      "sublabel": "pages, match, notify",
+      "pos": [235, 570],
+      "size": [180, 72]
+    },
+    {
+      "id": "local-services",
+      "type": "external",
+      "label": "Local adapters",
+      "sublabel": "MinIO webhook + LocalStack + Mailpit",
+      "pos": [570, 570],
+      "size": [220, 72]
+    },
+    {
+      "id": "matching",
+      "type": "backend",
+      "label": "Deterministic matcher",
+      "sublabel": "all pairs stored; top-K ranks",
+      "pos": [955, 570],
+      "size": [205, 72]
+    },
+    {
+      "id": "mail",
+      "type": "external",
+      "label": "Mailpit / SES branch",
+      "sublabel": "local proof is not SES proof",
+      "pos": [1290, 570],
+      "size": [185, 72]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "AWS target design — deployment prohibited in local mode",
+      "wraps": ["api", "uploads", "eventbridge", "queue", "ingestion", "postgres"],
+      "pad": 22
+    },
+    {
+      "kind": "security-group",
+      "label": "Lambda VPC to existing RDS path",
+      "wraps": ["ingestion", "postgres"],
+      "pad": 14
+    }
+  ],
+  "connections": [
+    { "id": "operator-api", "from": "operator", "to": "api", "label": "HTTPS / JSON", "variant": "emphasis" },
+    { "id": "api-s3", "from": "api", "to": "uploads", "label": "presigned PUT", "variant": "emphasis" },
+    { "id": "s3-eventbridge", "from": "uploads", "to": "eventbridge", "label": "Object Created", "variant": "dashed" },
+    { "id": "eventbridge-sqs", "from": "eventbridge", "to": "queue", "label": "async enqueue", "variant": "emphasis" },
+    { "id": "sqs-ingestion", "from": "queue", "to": "ingestion", "label": "SQS trigger", "variant": "emphasis" },
+    { "id": "ingestion-postgres", "from": "ingestion", "to": "postgres", "label": "batched SQL writes", "variant": "security" },
+    { "id": "n8n-local", "from": "n8n", "to": "local-services", "label": "local service calls", "variant": "dashed" },
+    { "id": "local-matching", "from": "local-services", "to": "matching", "label": "workflow inputs", "variant": "emphasis" },
+    { "id": "matching-postgres", "from": "matching", "to": "postgres", "label": "persist every pair", "variant": "security", "fromSide": "top", "toSide": "bottom", "route": "orthogonal-v" },
+    { "id": "matching-mail", "from": "matching", "to": "mail", "label": "ranked notifications", "variant": "dashed" },
+    { "id": "ingestion-n8n", "from": "ingestion", "to": "n8n", "label": "signed completion callback", "variant": "dashed", "fromSide": "bottom", "toSide": "top", "route": "orthogonal-v" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Local-first evidence",
+      "items": [
+        "MinIO webhook and event-router stand in for S3 + EventBridge.",
+        "LocalStack SQS and Mailpit are integration aids, not AWS proof."
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Data semantics",
+      "items": [
+        "Streaming ingestion is bounded and row-idempotent.",
+        "All deterministic matches are durable before top-K presentation."
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Deployment gate",
+      "items": [
+        "The AWS design is a reviewed blueprint only.",
+        "Do not deploy or invoke billable services without explicit approval."
+      ]
+    }
+  ]
+}

@@ -1,0 +1,134 @@
+{
+  "name": "Loan Eligibility - A Public Loan Catalog Ingestion",
+  "id": "public-loan-catalog-ingestion",
+  "active": true,
+  "settings": {"executionOrder": "v1", "saveManualExecutions": true, "callerPolicy": "workflowsFromSameOwner"},
+  "versionId": "7c68f0f0-6f56-4d9a-a3da-000000000001",
+  "meta": {"templateCredsSetupCompleted": false},
+  "tags": [],
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "a0000000-0000-4000-8000-000000000000", "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger", "typeVersion": 1, "position": [0, 160]
+    },
+    {
+      "parameters": {"rule": {"interval": [{"field": "hours", "hoursInterval": 24}]}},
+      "id": "a0000000-0000-4000-8000-000000000001", "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger", "typeVersion": 1.2, "position": [0, 0]
+    },
+    {
+      "parameters": {"assignments": {"assignments": [{"id": "source-mode", "name": "source_mode", "type": "string", "value": "={{ $env.LOAN_SOURCE_MODE || 'fixture' }}"}]}, "options": {}},
+      "id": "a0000000-0000-4000-8000-000000000002", "name": "Source Mode",
+      "type": "n8n-nodes-base.set", "typeVersion": 3.4, "position": [220, 0]
+    },
+    {
+      "parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"leftValue": "={{ $json.source_mode === 'fixture' }}", "rightValue": true, "operator": {"type": "boolean", "operation": "true", "singleValue": true}}], "combinator": "and"}, "options": {}},
+      "id": "a0000000-0000-4000-8000-000000000003", "name": "Use Local Fixtures?",
+      "type": "n8n-nodes-base.if", "typeVersion": 2.2, "position": [440, 0]
+    },
+    {
+      "parameters": {"filePath": "/data/workflows/fixtures/loans/community-bank-personal.html"},
+      "id": "a0000000-0000-4000-8000-000000000004", "name": "Fixture Community Bank Personal Loan",
+      "type": "n8n-nodes-base.readBinaryFile", "typeVersion": 1, "position": [680, -240]
+    },
+    {
+      "parameters": {"filePath": "/data/workflows/fixtures/loans/consumer-personal.html"},
+      "id": "a0000000-0000-4000-8000-000000000005", "name": "Fixture NerdWallet Personal Loan",
+      "type": "n8n-nodes-base.readBinaryFile", "typeVersion": 1, "position": [680, -80]
+    },
+    {
+      "parameters": {"filePath": "/data/workflows/fixtures/loans/credit-union.html"},
+      "id": "a0000000-0000-4000-8000-000000000006", "name": "Fixture Prosper Personal Loan",
+      "type": "n8n-nodes-base.readBinaryFile", "typeVersion": 1, "position": [680, 80]
+    },
+    {
+      "parameters": {"method": "GET", "url": "https://www.discover.com/personal-loans/", "options": {"response": {"response": {"responseFormat": "text"}}, "timeout": 20000}},
+      "id": "a0000000-0000-4000-8000-000000000007", "name": "Fetch Discover Personal Loan Page",
+      "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "continueOnFail": true, "position": [680, 320]
+    },
+    {
+      "parameters": {"method": "GET", "url": "https://www.nerdwallet.com/personal-loans", "options": {"response": {"response": {"responseFormat": "text"}}, "timeout": 20000}},
+      "id": "a0000000-0000-4000-8000-000000000008", "name": "Fetch NerdWallet Personal Loan Page",
+      "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "continueOnFail": true, "position": [680, 500]
+    },
+    {
+      "parameters": {"method": "GET", "url": "https://www.prosper.com/personal-loans", "options": {"response": {"response": {"responseFormat": "text"}}, "timeout": 20000}},
+      "id": "a0000000-0000-4000-8000-000000000009", "name": "Fetch Prosper Personal Loan Page",
+      "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "continueOnFail": true, "position": [680, 680]
+    },
+    {
+      "parameters": {"jsCode": "const item = $input.item; const raw = item.binary?.data?.data ? Buffer.from(item.binary.data.data, 'base64').toString('utf8') : String(item.json.body ?? item.json.data ?? ''); return [{ json: { ...item.json, product_html: raw, source_url: 'https://www.discover.com/personal-loans/', source_mode: 'fixture' } }];"},
+      "id": "a0000000-0000-4000-8000-000000000010", "name": "Tag Discover Fixture",
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [900, -240]
+    },
+    {
+      "parameters": {"jsCode": "const item = $input.item; const raw = item.binary?.data?.data ? Buffer.from(item.binary.data.data, 'base64').toString('utf8') : String(item.json.body ?? item.json.data ?? ''); return [{ json: { ...item.json, product_html: raw, source_url: 'https://www.nerdwallet.com/personal-loans', source_mode: 'fixture' } }];"},
+      "id": "a0000000-0000-4000-8000-000000000011", "name": "Tag NerdWallet Fixture",
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [900, -80]
+    },
+    {
+      "parameters": {"jsCode": "const item = $input.item; const raw = item.binary?.data?.data ? Buffer.from(item.binary.data.data, 'base64').toString('utf8') : String(item.json.body ?? item.json.data ?? ''); return [{ json: { ...item.json, product_html: raw, source_url: 'https://www.prosper.com/personal-loans', source_mode: 'fixture' } }];"},
+      "id": "a0000000-0000-4000-8000-000000000012", "name": "Tag Prosper Fixture",
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [900, 80]
+    },
+    {
+      "parameters": {"jsCode": "return [{ json: { ...$json, source_url: 'https://www.discover.com/personal-loans/', source_mode: 'public' } }];"},
+      "id": "a0000000-0000-4000-8000-000000000013", "name": "Tag Discover Public Page",
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [900, 320]
+    },
+    {
+      "parameters": {"jsCode": "return [{ json: { ...$json, source_url: 'https://www.nerdwallet.com/personal-loans', source_mode: 'public' } }];"},
+      "id": "a0000000-0000-4000-8000-000000000014", "name": "Tag NerdWallet Public Page",
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [900, 500]
+    },
+    {
+      "parameters": {"jsCode": "return [{ json: { ...$json, source_url: 'https://www.prosper.com/personal-loans', source_mode: 'public' } }];"},
+      "id": "a0000000-0000-4000-8000-000000000015", "name": "Tag Prosper Public Page",
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [900, 680]
+    },
+    {
+      "parameters": {"jsCode": "const publicSources = ['https://www.discover.com/personal-loans/', 'https://www.nerdwallet.com/personal-loans', 'https://www.prosper.com/personal-loans']; const fallbacks = { 'https://www.discover.com/personal-loans/': '<title>Discover Personal Loan</title><p>Personal loans with minimum credit score of 680 and monthly income of $4,000.</p>', 'https://www.nerdwallet.com/personal-loans': '<title>NerdWallet Personal Loan</title><p>Personal loan offers with minimum credit score of 640 and monthly income of $2,500.</p>', 'https://www.prosper.com/personal-loans': '<title>Prosper Personal Loan</title><p>Personal loans with minimum credit score of 600 and monthly income of $1,800.</p>' }; const pages = $input.all(); const defaultMode = $items('Source Mode')[0]?.json?.source_mode || 'fixture'; return pages.map((item, index) => { const sourceUrl = String(item.json.source_url || publicSources[index % publicSources.length]); const fetched = String(item.json.product_html ?? item.json.body ?? item.json.data ?? ''); const usedFallback = !fetched.trim(); const raw = usedFallback ? fallbacks[sourceUrl] : fetched; const sourceMode = usedFallback ? 'fixture' : (item.json.source_mode === 'public' || defaultMode === 'public' ? 'public' : 'fixture'); const text = raw.replace(/<script[\\s\\S]*?<\\/script>/gi, ' ').replace(/<style[\\s\\S]*?<\\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\\s+/g, ' ').trim(); const title = (String(raw).match(/<title[^>]*>([\\s\\S]*?)<\\/title>/i)?.[1] || `Personal Loan ${index + 1}`).replace(/<[^>]+>/g, '').trim(); const sourceIndex = Math.max(0, publicSources.indexOf(sourceUrl)); const digest = require('crypto').createHash('sha256').update(raw, 'utf8').digest('hex'); return { json: { product_id: `public-personal-loan-${sourceIndex + 1}`, name: title.slice(0, 255), source_url: sourceUrl, source_mode: sourceMode, product_text: text.slice(0, 12000), retrieved_at: new Date().toISOString(), content_sha256: digest, fallback_used: usedFallback } }; });"},
+      "id": "a0000000-0000-4000-8000-000000000016", "name": "Extract Public Criteria Text",
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1140, 180]
+    },
+    {
+      "parameters": {"method": "POST", "url": "={{ ['openai', 'openai-compatible'].includes(String($env.LLM_MODE || 'stub').toLowerCase()) ? (($env.LLM_API_BASE_URL || 'http://host.docker.internal:11434/v1').replace(/\\/$/, '') + '/chat/completions') : (($env.LLM_STUB_URL || 'http://llm-stub:8090').replace(/\\/$/, '') + '/extract') }}", "sendBody": true, "specifyBody": "json", "jsonBody": "={{ ['openai', 'openai-compatible'].includes(String($env.LLM_MODE || 'stub').toLowerCase()) ? JSON.stringify({ model: $env.LLM_MODEL || 'local-model', temperature: 0, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Extract only supported deterministic loan criteria and return JSON with product_id, name, criteria, source_url, ambiguous_criteria, confidence.' }, { role: 'user', content: `Public source URL: ${$json.source_url}\\nPublic product text: ${$json.product_text}` }] }) : JSON.stringify({ product_id: $json.product_id, name: $json.name, source_url: $json.source_url, product_text: $json.product_text }) }}", "options": {"timeout": 15000}},
+      "id": "a0000000-0000-4000-8000-000000000017", "name": "Local LLM - Resolve Ambiguous Criteria",
+      "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [1380, 180]
+    },
+    {
+      "parameters": {"jsCode": "const original = $items('Extract Public Criteria Text')[$itemIndex]?.json || {}; let value = $json; if (Array.isArray($json.choices) && $json.choices[0]?.message?.content) value = $json.choices[0].message.content; if (typeof value === 'string') value = JSON.parse(value.replace(/^```json\\s*/i, '').replace(/\\s*```$/, '')); value = { ...original, ...value }; const allowed = new Set(['min_monthly_income', 'max_monthly_income', 'min_credit_score', 'max_credit_score', 'employment_status', 'min_age', 'max_age']); if (!value.product_id || !value.name) throw new Error('LLM output missing product identity'); if (!value.criteria || typeof value.criteria !== 'object' || Array.isArray(value.criteria)) throw new Error('LLM criteria must be an object'); for (const key of Object.keys(value.criteria)) if (!allowed.has(key)) throw new Error(`unsupported criterion: ${key}`); if (!Array.isArray(value.ambiguous_criteria) || !['high', 'medium', 'low'].includes(value.confidence)) throw new Error('LLM output does not match the product schema'); if (!/^https?:\\/\\//.test(String(value.source_url))) throw new Error('LLM source_url must be public HTTP(S)'); if (!['fixture', 'public'].includes(value.source_mode)) throw new Error('source_mode must be fixture or public'); return [{ json: { ...value, active: true } }];"},
+      "id": "a0000000-0000-4000-8000-000000000018", "name": "Validate Structured Loan Product",
+      "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [1620, 180]
+    },
+    {
+      "parameters": {"operation": "executeQuery", "query": "INSERT INTO loan_products (product_id, name, criteria, source_url, source_mode, retrieved_at, content_sha256, active) VALUES ($1, $2, $3::jsonb, $4, $5, $6::timestamptz, $7, $8) ON CONFLICT (product_id) DO UPDATE SET name = EXCLUDED.name, criteria = EXCLUDED.criteria, source_url = EXCLUDED.source_url, source_mode = EXCLUDED.source_mode, retrieved_at = EXCLUDED.retrieved_at, content_sha256 = EXCLUDED.content_sha256, active = EXCLUDED.active, updated_at = now() RETURNING product_id, updated_at;", "options": {"queryReplacement": "={{ [$json.product_id, $json.name, JSON.stringify($json.criteria), $json.source_url, $json.source_mode, $json.retrieved_at, $json.content_sha256, $json.active] }}"}},
+      "id": "a0000000-0000-4000-8000-000000000019", "name": "Upsert loan_products",
+      "type": "n8n-nodes-base.postgres", "typeVersion": 2.5, "position": [1860, 180],
+      "credentials": {"postgres": {"id": "", "name": "Postgres local (configure in n8n)"}}
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {"main": [[{"node": "Source Mode", "type": "main", "index": 0}]]},
+    "Manual Test Trigger": {"main": [[{"node": "Source Mode", "type": "main", "index": 0}]]},
+    "Source Mode": {"main": [[{"node": "Use Local Fixtures?", "type": "main", "index": 0}]]},
+    "Use Local Fixtures?": {"main": [[{"node": "Fixture Community Bank Personal Loan", "type": "main", "index": 0}, {"node": "Fixture NerdWallet Personal Loan", "type": "main", "index": 0}, {"node": "Fixture Prosper Personal Loan", "type": "main", "index": 0}], [{"node": "Fetch Discover Personal Loan Page", "type": "main", "index": 0}, {"node": "Fetch NerdWallet Personal Loan Page", "type": "main", "index": 0}, {"node": "Fetch Prosper Personal Loan Page", "type": "main", "index": 0}]]},
+    "Fixture Community Bank Personal Loan": {"main": [[{"node": "Tag Discover Fixture", "type": "main", "index": 0}]]},
+    "Fixture NerdWallet Personal Loan": {"main": [[{"node": "Tag NerdWallet Fixture", "type": "main", "index": 0}]]},
+    "Fixture Prosper Personal Loan": {"main": [[{"node": "Tag Prosper Fixture", "type": "main", "index": 0}]]},
+    "Fetch Discover Personal Loan Page": {"main": [[{"node": "Tag Discover Public Page", "type": "main", "index": 0}]]},
+    "Fetch NerdWallet Personal Loan Page": {"main": [[{"node": "Tag NerdWallet Public Page", "type": "main", "index": 0}]]},
+    "Fetch Prosper Personal Loan Page": {"main": [[{"node": "Tag Prosper Public Page", "type": "main", "index": 0}]]},
+    "Tag Discover Fixture": {"main": [[{"node": "Extract Public Criteria Text", "type": "main", "index": 0}]]},
+    "Tag NerdWallet Fixture": {"main": [[{"node": "Extract Public Criteria Text", "type": "main", "index": 0}]]},
+    "Tag Prosper Fixture": {"main": [[{"node": "Extract Public Criteria Text", "type": "main", "index": 0}]]},
+    "Tag Discover Public Page": {"main": [[{"node": "Extract Public Criteria Text", "type": "main", "index": 0}]]},
+    "Tag NerdWallet Public Page": {"main": [[{"node": "Extract Public Criteria Text", "type": "main", "index": 0}]]},
+    "Tag Prosper Public Page": {"main": [[{"node": "Extract Public Criteria Text", "type": "main", "index": 0}]]},
+    "Extract Public Criteria Text": {"main": [[{"node": "Local LLM - Resolve Ambiguous Criteria", "type": "main", "index": 0}]]},
+    "Local LLM - Resolve Ambiguous Criteria": {"main": [[{"node": "Validate Structured Loan Product", "type": "main", "index": 0}]]},
+    "Validate Structured Loan Product": {"main": [[{"node": "Upsert loan_products", "type": "main", "index": 0}]]}
+  },
+  "pinData": {}
+}

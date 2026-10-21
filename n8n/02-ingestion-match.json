@@ -1,0 +1,276 @@
+{
+  "name": "Loan Eligibility - B Ingestion and Deterministic Matching",
+  "id": "loan-ingestion-match",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "7c68f0f0-6f56-4d9a-a3da-000000000002",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [],
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "loan-ingestion-completed",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "b0000000-0000-4000-8000-000000000001",
+      "name": "Ingestion Completed Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "webhookId": "loan-ingestion-completed"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst envelope = $json.body && typeof $json.body === 'object' ? $json.body : $json;\nconst headers = $json.headers || {};\nconst signature = headers['x-n8n-signature'] || headers['X-N8N-Signature'];\nconst timestamp = headers['x-n8n-timestamp'] || headers['X-N8N-Timestamp'];\nif (!envelope.event_id || typeof envelope.event_id !== 'string') throw new Error('missing event_id');\nif (envelope.event_type !== 'users.ingestion.completed') throw new Error('unexpected ingestion event type');\nif (envelope.status !== 'completed') throw new Error('ingestion event status must be completed');\nif (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(envelope.upload_batch_id))) throw new Error('upload_batch_id must be a UUID');\nif (!envelope.occurred_at || Number.isNaN(Date.parse(envelope.occurred_at))) throw new Error('invalid occurred_at');\nif (!signature || !timestamp || !/^[0-9]+$/.test(String(timestamp)) || !/^sha256=[0-9a-f]{64}$/i.test(signature)) throw new Error('signed ingestion event is required');\nif (Math.abs(Math.floor(Date.now() / 1000) - Number(timestamp)) > 300) throw new Error('ingestion signature timestamp is outside the replay window');\nconst secret = String($env.N8N_WEBHOOK_SECRET || '');\nif (!secret) throw new Error('N8N_WEBHOOK_SECRET is required');\nconst canonical = value => { if (value === null || typeof value !== 'object') return JSON.stringify(value); if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`; return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${canonical(value[key])}`).join(',')}}`; };\nconst expected = crypto.createHmac('sha256', secret).update(`${timestamp}.${canonical(envelope)}`, 'utf8').digest('hex');\nconst received = signature.slice(7);\nconst expectedBytes = Buffer.from(expected, 'hex');\nconst receivedBytes = Buffer.from(received, 'hex');\nif (expectedBytes.length !== receivedBytes.length || !crypto.timingSafeEqual(expectedBytes, receivedBytes)) throw new Error('invalid ingestion event signature');\nreturn [{ json: { ...envelope, verified: true } }];"
+      },
+      "id": "b0000000-0000-4000-8000-000000000002",
+      "name": "Verify Signed Ingestion Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH inserted AS (INSERT INTO processed_events (event_id, event_type, payload) VALUES ($1, $2, $3::jsonb) ON CONFLICT (event_id) DO NOTHING RETURNING event_id) SELECT EXISTS (SELECT 1 FROM inserted) AS is_new, $1 AS event_id, $2 AS event_type, $4::uuid AS upload_batch_id;",
+        "options": {
+          "queryReplacement": "={{ [$json.event_id, $json.event_type, JSON.stringify($json), $json.upload_batch_id] }}"
+        }
+      },
+      "id": "b0000000-0000-4000-8000-000000000003",
+      "name": "Record Event Idempotency",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 0],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.is_new === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b0000000-0000-4000-8000-000000000004",
+      "name": "Event Is New?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'duplicate', event_type: 'users.ingestion.completed', event_id: $json.event_id, upload_batch_id: $json.upload_batch_id, metrics: { evaluated: 0, stored: 0 } }) }}",
+        "options": {}
+      },
+      "id": "b0000000-0000-4000-8000-000000000005",
+      "name": "Respond Duplicate Event",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [900, 180]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, upload_batch_id, user_id, name, email, monthly_income, credit_score, employment_status, age FROM users WHERE upload_batch_id = $1 ORDER BY source_row_number;",
+        "options": {
+          "queryReplacement": "={{ $items('Verify Signed Ingestion Event')[0].json.upload_batch_id }}"
+        }
+      },
+      "id": "b0000000-0000-4000-8000-000000000006",
+      "name": "Fetch Users",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [900, -100],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id, product_id, name, criteria, active FROM loan_products WHERE active = true ORDER BY product_id;",
+        "options": {}
+      },
+      "id": "b0000000-0000-4000-8000-000000000007",
+      "name": "Fetch Active Products",
+      "executeOnce": true,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1120, -100],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT u.id AS user_uuid, u.upload_batch_id, u.user_id, u.name, u.email, u.monthly_income, u.credit_score, u.employment_status, u.age, p.id AS loan_product_uuid, p.product_id, p.name AS product_name, p.criteria, CASE WHEN (p.criteria->>'min_monthly_income' IS NULL OR u.monthly_income >= (p.criteria->>'min_monthly_income')::numeric) AND (p.criteria->>'max_monthly_income' IS NULL OR u.monthly_income <= (p.criteria->>'max_monthly_income')::numeric) AND (p.criteria->>'min_credit_score' IS NULL OR u.credit_score >= (p.criteria->>'min_credit_score')::integer) AND (p.criteria->>'max_credit_score' IS NULL OR u.credit_score <= (p.criteria->>'max_credit_score')::integer) AND (p.criteria->>'min_age' IS NULL OR u.age >= (p.criteria->>'min_age')::integer) AND (p.criteria->>'max_age' IS NULL OR u.age <= (p.criteria->>'max_age')::integer) AND (p.criteria->>'employment_status' IS NULL OR lower(u.employment_status) = lower(p.criteria->>'employment_status') OR p.criteria->'employment_status' ? lower(u.employment_status)) THEN true ELSE false END AS sql_candidate FROM users u CROSS JOIN loan_products p WHERE u.upload_batch_id = $1 AND p.active = true;",
+        "options": {
+          "queryReplacement": "={{ $items('Verify Signed Ingestion Event')[0].json.upload_batch_id }}"
+        }
+      },
+      "alwaysOutputData": true,
+      "id": "b0000000-0000-4000-8000-000000000008",
+      "name": "SQL Coarse Filter",
+      "executeOnce": true,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1340, -100],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = $items('Verify Signed Ingestion Event')[0].json;\nconst users = $items('Fetch Users').map(item => item.json);\nconst products = $items('Fetch Active Products').map(item => item.json);\nconst candidateKeys = new Set($input.all().map(item => item.json).filter(row => row.user_uuid && row.loan_product_uuid).map(row => `${row.user_uuid}:${row.loan_product_uuid}`));\nconst known = new Set(['min_monthly_income', 'max_monthly_income', 'min_credit_score', 'max_credit_score', 'employment_status', 'min_age', 'max_age']);\nconst matches = [];\nfor (const user of users) {\n  for (const product of products) {\n    const criteria = typeof product.criteria === 'string' ? JSON.parse(product.criteria) : (product.criteria || {});\n    const checks = {\n      min_monthly_income: criteria.min_monthly_income == null || Number(user.monthly_income) >= Number(criteria.min_monthly_income),\n      max_monthly_income: criteria.max_monthly_income == null || Number(user.monthly_income) <= Number(criteria.max_monthly_income),\n      min_credit_score: criteria.min_credit_score == null || Number(user.credit_score) >= Number(criteria.min_credit_score),\n      max_credit_score: criteria.max_credit_score == null || Number(user.credit_score) <= Number(criteria.max_credit_score),\n      min_age: criteria.min_age == null || Number(user.age) >= Number(criteria.min_age),\n      max_age: criteria.max_age == null || Number(user.age) <= Number(criteria.max_age),\n      employment_status: criteria.employment_status == null || (Array.isArray(criteria.employment_status) ? criteria.employment_status.map(String).map(value => value.toLowerCase()).includes(String(user.employment_status).toLowerCase()) : String(criteria.employment_status).toLowerCase() === String(user.employment_status).toLowerCase())\n    };\n    const unknownCriteria = Object.fromEntries(Object.entries(criteria).filter(([key]) => !known.has(key)));\n    const failed = Object.entries(checks).filter(([, passed]) => !passed).map(([key]) => key);\n    const reasons = failed.map(key => `${key} failed`);\n    if (Object.keys(unknownCriteria).length) reasons.push(`criteria not evaluated: ${Object.keys(unknownCriteria).join(', ')}`);\n    const decision = failed.length ? 'ineligible' : (Object.keys(unknownCriteria).length ? 'may_qualify' : 'eligible');\n    matches.push({ upload_batch_id: event.upload_batch_id, user_uuid: user.id, loan_product_uuid: product.id, user_id: user.user_id, email: user.email, user_name: user.name, product_id: product.product_id, product_name: product.name, decision, evaluated_criteria: checks, unknown_criteria: unknownCriteria, reasons, is_match: true });\n  }\n}\nconst eligible = matches.filter(row => row.decision === 'eligible').length;\nconst mayQualify = matches.filter(row => row.decision === 'may_qualify').length;\nconst unknown = matches.filter(row => row.decision === 'unknown').length;\nconst topK = Math.max(0, Number($env.TOP_K || 10));\nconst metrics = { naive: users.length * products.length, candidates: candidateKeys.size, evaluated: matches.length, stored: matches.length, eligible, may_qualify: mayQualify, unknown, ineligible: matches.length - eligible - mayQualify - unknown, top_k_highlights: Math.min(topK, eligible + mayQualify + unknown) };\nif (metrics.evaluated !== metrics.naive || metrics.stored !== metrics.evaluated || metrics.candidates > metrics.naive || metrics.top_k_highlights > eligible + mayQualify + unknown) throw new Error('matching count invariants failed');\nif (!matches.length) return [{ json: { ...event, is_summary: true, metrics } }];\nreturn matches.map(match => ({ json: { ...match, metrics } }));"
+      },
+      "id": "b0000000-0000-4000-8000-000000000009",
+      "name": "Match Users with n8n Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, -100]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.is_summary ? 'SELECT 0 AS stored' : 'INSERT INTO matches (upload_batch_id, user_id, loan_product_id, decision, evaluated_criteria, unknown_criteria, reasons) VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb) ON CONFLICT (upload_batch_id, user_id, loan_product_id) DO UPDATE SET decision = EXCLUDED.decision, evaluated_criteria = EXCLUDED.evaluated_criteria, unknown_criteria = EXCLUDED.unknown_criteria, reasons = EXCLUDED.reasons RETURNING upload_batch_id, user_id, loan_product_id;' }}",
+        "options": {
+          "queryReplacement": "={{ $json.is_summary ? [] : [$json.upload_batch_id, $json.user_uuid, $json.loan_product_uuid, $json.decision, JSON.stringify($json.evaluated_criteria), JSON.stringify($json.unknown_criteria), JSON.stringify($json.reasons)] }}"
+        }
+      },
+      "id": "b0000000-0000-4000-8000-000000000010",
+      "name": "Store Every Deterministic Match",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1780, -100],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const source = $items('Match Users with n8n Code');\nconst first = source[0]?.json || {};\nconst metrics = first.metrics || { naive: 0, candidates: 0, evaluated: 0, stored: 0, eligible: 0, may_qualify: 0, unknown: 0, ineligible: 0, top_k_highlights: 0 };\nif (metrics.naive !== metrics.evaluated || metrics.evaluated !== metrics.stored || metrics.candidates > metrics.naive || metrics.top_k_highlights > metrics.eligible + metrics.may_qualify + metrics.unknown) throw new Error('matching count invariant failed');\nreturn [{ json: { event_id: `match-completed:${first.upload_batch_id}`, event_type: 'matches.completed', upload_batch_id: first.upload_batch_id, status: 'completed', metrics, presentation_limit: Math.max(0, Number($env.TOP_K || 10)), verified_ingestion: true, next_workflow: 'loan-eligibility-email-delivery' } }];"
+      },
+      "id": "b0000000-0000-4000-8000-000000000011",
+      "name": "Compute Metrics and Enforce Invariant",
+      "executeOnce": true,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, -100]
+    },
+    {
+      "parameters": {
+        "source": "database",
+        "workflowId": {
+          "__rl": true,
+          "value": "={{ $env.WORKFLOW_C_ID || 'loan-eligibility-email-delivery' }}",
+          "mode": "list",
+          "cachedResultName": "Loan Eligibility - C Grouped Email Delivery"
+        },
+        "mode": "once",
+        "options": {
+          "waitForSubWorkflow": true
+        }
+      },
+      "id": "b0000000-0000-4000-8000-000000000012",
+      "name": "Execute Workflow C - Email Delivery",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.1,
+      "position": [2220, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'completed', event_type: $json.event_type, event_id: $json.event_id, upload_batch_id: $json.upload_batch_id, metrics: $json.metrics }) }}",
+        "options": {}
+      },
+      "id": "b0000000-0000-4000-8000-000000000013",
+      "name": "Respond to Ingestion Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [2440, -100]
+    }
+  ],
+  "connections": {
+    "Ingestion Completed Webhook": {
+      "main": [[{"node": "Verify Signed Ingestion Event", "type": "main", "index": 0}]]
+    },
+    "Verify Signed Ingestion Event": {
+      "main": [[{"node": "Record Event Idempotency", "type": "main", "index": 0}]]
+    },
+    "Record Event Idempotency": {
+      "main": [[{"node": "Event Is New?", "type": "main", "index": 0}]]
+    },
+    "Event Is New?": {
+      "main": [
+        [{"node": "Fetch Users", "type": "main", "index": 0}],
+        [{"node": "Respond Duplicate Event", "type": "main", "index": 0}]
+      ]
+    },
+    "Fetch Users": {
+      "main": [[{"node": "Fetch Active Products", "type": "main", "index": 0}]]
+    },
+    "Fetch Active Products": {
+      "main": [[{"node": "SQL Coarse Filter", "type": "main", "index": 0}]]
+    },
+    "SQL Coarse Filter": {
+      "main": [[{"node": "Match Users with n8n Code", "type": "main", "index": 0}]]
+    },
+    "Match Users with n8n Code": {
+      "main": [[{"node": "Store Every Deterministic Match", "type": "main", "index": 0}]]
+    },
+    "Store Every Deterministic Match": {
+      "main": [[{"node": "Compute Metrics and Enforce Invariant", "type": "main", "index": 0}]]
+    },
+    "Compute Metrics and Enforce Invariant": {
+      "main": [[{"node": "Execute Workflow C - Email Delivery", "type": "main", "index": 0}]]
+    },
+    "Execute Workflow C - Email Delivery": {
+      "main": [[{"node": "Respond to Ingestion Webhook", "type": "main", "index": 0}]]
+    }
+  },
+  "pinData": {}
+}

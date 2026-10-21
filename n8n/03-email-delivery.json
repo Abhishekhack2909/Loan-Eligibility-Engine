@@ -1,0 +1,442 @@
+{
+  "name": "Loan Eligibility - C Grouped Email Delivery",
+  "id": "loan-eligibility-email-delivery",
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "versionId": "7c68f0f0-6f56-4d9a-a3da-000000000003",
+  "meta": {
+    "templateCredsSetupCompleted": false
+  },
+  "tags": [],
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "c0000000-0000-4000-8000-000000000001",
+      "name": "When B Calls Workflow C",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "loan-demo-notification",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000019",
+      "name": "Demo Notification Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 180],
+      "webhookId": "loan-demo-notification"
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = $json.body && typeof $json.body === 'object' ? $json.body : $json;\nif (event.event_type !== 'matches.completed') throw new Error('Workflow C requires a matches.completed event');\nif (event.status !== 'completed') throw new Error('Workflow C requires a completed match event');\nif (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(event.upload_batch_id))) throw new Error('Workflow C requires a UUID batch id');\nconst metrics = event.metrics || {};\nif (Number(metrics.naive) !== Number(metrics.evaluated) || Number(metrics.evaluated) !== Number(metrics.stored) || Number(metrics.candidates) > Number(metrics.naive) || Number(metrics.top_k_highlights) > Number(metrics.eligible) + Number(metrics.may_qualify) + Number(metrics.unknown)) throw new Error('Workflow C received invalid match metrics');\nif (event.demo_only === true) { const expected = String($env.DEMO_NOTIFICATION_TOKEN || ''); if (!expected || String(event.demo_token || '') !== expected) throw new Error('invalid demo notification token'); if (!Array.isArray(event.demo_targets) || event.demo_targets.length < 1 || event.demo_targets.length > 2) throw new Error('demo notification must target one or two users'); }\nreturn [{ json: { ...event, verified: true } }];"
+      },
+      "id": "c0000000-0000-4000-8000-000000000002",
+      "name": "Verify Match Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH demo_targets AS (SELECT user_id::uuid, lower(recipient) AS recipient FROM jsonb_to_recordset($2::jsonb) AS x(user_id text, recipient text)), notification_matches AS (SELECT m.upload_batch_id, m.user_id, u.email, u.name AS user_name, coalesce(dt.recipient, u.email) AS delivery_recipient, p.product_id, p.name AS product_name, m.decision, m.reasons, false AS no_match FROM matches m JOIN users u ON u.id = m.user_id JOIN loan_products p ON p.id = m.loan_product_id LEFT JOIN demo_targets dt ON dt.user_id = m.user_id WHERE m.upload_batch_id = $1 AND m.decision IN ('eligible', 'may_qualify', 'unknown') AND (jsonb_array_length($2::jsonb) = 0 OR dt.user_id IS NOT NULL)) SELECT * FROM notification_matches UNION ALL SELECT $1::uuid, NULL::uuid, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, NULL::text, '[]'::jsonb, true WHERE NOT EXISTS (SELECT 1 FROM notification_matches) ORDER BY user_id NULLS LAST, product_id NULLS LAST LIMIT $3;",
+        "options": {
+          "queryReplacement": "={{ [$json.upload_batch_id, JSON.stringify($json.demo_targets || []), $json.presentation_limit || 10] }}"
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000003",
+      "name": "Fetch Stored Eligible Matches",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [440, 0],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const awsDemo = String($env.AWS_DEMO_MODE || 'false').toLowerCase() === 'true';\nif (!awsDemo) return $input.all();\nconst recipients = String($env.AWS_DEMO_RECIPIENTS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean);\nconst assigned = new Map();\nreturn $input.all().map(item => { const row = item.json; if (row.no_match || !row.user_id) return item; const key = String(row.user_id); if (!assigned.has(key)) assigned.set(key, recipients[assigned.size] || ''); return { json: { ...row, delivery_recipient: assigned.get(key) } }; });"
+      },
+      "id": "c0000000-0000-4000-8000-000000000020",
+      "name": "Apply AWS Demo Recipient Map",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [550, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = $items('Verify Match Event')[0].json;\nconst rows = $input.all().map(item => item.json).filter(row => !row.no_match && row.user_id && row.email);\nif (!rows.length) return [{ json: { upload_batch_id: event.upload_batch_id, no_matches: true, template_key: 'eligible-loans-v1' } }];\nconst allowlist = new Set(String($env.DEMO_RECIPIENTS || '').split(',').map(value => value.trim().toLowerCase()).filter(Boolean));\nif (!allowlist.size) throw new Error('DEMO_RECIPIENTS must be a non-empty controlled allowlist');\nconst targets = new Map((event.demo_targets || []).map(target => [String(target.user_id), String(target.recipient).trim().toLowerCase()]));\nif (event.demo_only === true && targets.size !== event.demo_targets.length) throw new Error('demo targets contain duplicate users');\nconst groups = new Map();\nfor (const row of rows) {\n  const sourceRecipient = String(row.email).trim().toLowerCase();\n  const recipient = String(row.delivery_recipient || sourceRecipient).trim().toLowerCase();\n  if (!recipient || /[\\r\\n]/.test(recipient)) throw new Error('recipient contains an unsafe character');\n  if (event.demo_only === true && (!targets.has(String(row.user_id)) || targets.get(String(row.user_id)) !== recipient || recipient === sourceRecipient)) throw new Error('demo delivery recipient mapping is invalid');\n  const key = `${row.user_id}:${recipient}`;\n  const current = groups.get(key) || { upload_batch_id: event.upload_batch_id, user_uuid: row.user_id, recipient, user_name: row.user_name, product_ids: [], product_names: [], decisions: [] };\n  current.product_ids.push(row.product_id);\n  current.product_names.push(row.product_name);\n  current.decisions.push(row.decision);\n  groups.set(key, current);\n}\nreturn [...groups.values()].map(group => {\n  const allowed = allowlist.has(group.recipient);\n  if (event.demo_only === true && !allowed) throw new Error('demo recipient is not allowlisted');\n  const qualified = group.product_names.length ? group.product_names.join(', ') : 'no matching products';\n  return { json: { ...group, template_key: 'eligible-loans-demo-v1', delivery_status: allowed ? 'queued' : 'blocked', allowlisted: allowed, subject: 'Your loan eligibility results', text: `Hello ${group.user_name},\\n\\nBased on the information you supplied, you may qualify for: ${qualified}.\\n\\nThis is an informational result, not a lending decision.` } };\n});"
+      },
+      "id": "c0000000-0000-4000-8000-000000000004",
+      "name": "Group Matches and Apply DEMO_RECIPIENTS Allowlist",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.no_matches !== true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000005",
+      "name": "Has Notification Matches?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [880, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.allowlisted === true }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000006",
+      "name": "Recipient Allowed?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1100, 0]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO email_deliveries (upload_batch_id, user_id, recipient, template_key, status, error_message) VALUES ($1, $2, $3, $4, 'failed', $5) ON CONFLICT (upload_batch_id, user_id, recipient, template_key) DO UPDATE SET status = EXCLUDED.status, error_message = EXCLUDED.error_message RETURNING upload_batch_id, user_id, recipient;",
+        "options": {
+          "queryReplacement": "={{ [$json.upload_batch_id, $json.user_uuid, $json.recipient, $json.template_key, 'recipient is not in DEMO_RECIPIENTS'] }}"
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000007",
+      "name": "Record Blocked Delivery",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1320, 180],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ ($env.MAIL_DELIVERY_MODE || 'mailpit') === 'mailpit' }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000008",
+      "name": "Use Mailpit Local Branch?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1320, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.MAILPIT_API_URL || 'http://mailpit:8025/api/v1/send' }}",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ From: { Email: $env.MAIL_FROM || 'loan-engine@example.test', Name: 'Loan Eligibility Engine' }, To: [{ Email: $json.recipient, Name: $json.user_name }], Subject: $json.subject, Text: $json.text }) }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000009",
+      "name": "Mailpit Local HTTP Delivery",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1540, -180]
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $items('Group Matches and Apply DEMO_RECIPIENTS Allowlist')[$itemIndex].json;\nreturn [{ json: { ...original, delivery_status: 'sent', provider_message_id: $json.ID || $json.id || `mailpit-${original.recipient}` } }];"
+      },
+      "id": "c0000000-0000-4000-8000-000000000010",
+      "name": "Mark Mailpit Sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, -180]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO email_deliveries (upload_batch_id, user_id, recipient, template_key, status, provider_message_id, sent_at) VALUES ($1, $2, $3, $4, 'sent', $5, now()) ON CONFLICT (upload_batch_id, user_id, recipient, template_key) DO UPDATE SET status = EXCLUDED.status, provider_message_id = EXCLUDED.provider_message_id, sent_at = now(), error_message = NULL RETURNING upload_batch_id, user_id, recipient;",
+        "options": {
+          "queryReplacement": "={{ [$json.upload_batch_id, $json.user_uuid, $json.recipient, $json.template_key, $json.provider_message_id] }}"
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000011",
+      "name": "Record Mailpit Delivery",
+      "executeOnce": false,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1980, -180],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $env.AWS_SES_ENABLED === 'true' && !!$env.AWS_SES_CREDENTIAL_NAME && !!$env.AWS_SES_FROM }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "c0000000-0000-4000-8000-000000000012",
+      "name": "AWS SES Credential Gate",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1540, 40]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.AWS_SES_FROM }}",
+        "toAddresses": [
+          "={{ $json.recipient }}"
+        ],
+        "subject": "={{ $json.subject }}",
+        "body": "={{ $json.text }}"
+      },
+      "id": "c0000000-0000-4000-8000-000000000013",
+      "name": "AWS SES Delivery (credential-gated)",
+      "type": "n8n-nodes-base.awsSes",
+      "typeVersion": 1,
+      "position": [1760, -20],
+      "credentials": {
+        "aws": {
+          "id": "loan-engine-aws-ses",
+          "name": "AWS SES (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $items('Group Matches and Apply DEMO_RECIPIENTS Allowlist')[$itemIndex].json;\nconst response = $json || {};\nconst providerMessageId = response.MessageId || response.messageId || response.SendEmailResponse?.MessageId || response.SendEmailResponse?.SendEmailResult?.MessageId || response.SendEmailResult?.MessageId || `ses-${original.recipient}`;\nreturn [{ json: { ...original, delivery_status: 'sent', provider_message_id: providerMessageId } }];"
+      },
+      "id": "c0000000-0000-4000-8000-000000000014",
+      "name": "Mark SES Sent",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1980, -20]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO email_deliveries (upload_batch_id, user_id, recipient, template_key, status, provider_message_id, sent_at) VALUES ($1, $2, $3, $4, 'sent', $5, now()) ON CONFLICT (upload_batch_id, user_id, recipient, template_key) DO UPDATE SET status = EXCLUDED.status, provider_message_id = EXCLUDED.provider_message_id, sent_at = now(), error_message = NULL RETURNING upload_batch_id, user_id, recipient;",
+        "options": {
+          "queryReplacement": "={{ [$json.upload_batch_id, $json.user_uuid, $json.recipient, $json.template_key, $json.provider_message_id] }}"
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000015",
+      "name": "Record SES Delivery",
+      "executeOnce": false,
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [2200, -20],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const original = $items('Group Matches and Apply DEMO_RECIPIENTS Allowlist')[$itemIndex].json;\nreturn [{ json: { ...original, delivery_status: 'failed', provider_message_id: null, delivery_error: 'AWS SES is disabled or its credential/from-address gate is not configured' } }];"
+      },
+      "id": "c0000000-0000-4000-8000-000000000016",
+      "name": "Mark SES Disabled",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1760, 160]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO email_deliveries (upload_batch_id, user_id, recipient, template_key, status, error_message) VALUES ($1, $2, $3, $4, 'failed', $5) ON CONFLICT (upload_batch_id, user_id, recipient, template_key) DO UPDATE SET status = EXCLUDED.status, error_message = EXCLUDED.error_message RETURNING upload_batch_id, user_id, recipient;",
+        "options": {
+          "queryReplacement": "={{ [$json.upload_batch_id, $json.user_uuid, $json.recipient, $json.template_key, $json.delivery_error] }}"
+        }
+      },
+      "id": "c0000000-0000-4000-8000-000000000017",
+      "name": "Record SES Disabled Delivery",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.5,
+      "position": [1980, 160],
+      "credentials": {
+        "postgres": {
+          "id": "",
+          "name": "Postgres local (configure in n8n)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = $items('Verify Match Event')[0].json;\nconst noMatches = $items('Group Matches and Apply DEMO_RECIPIENTS Allowlist')[0]?.json?.no_matches === true;\nreturn [{ json: { status: 'completed', upload_batch_id: event.upload_batch_id, deliveries_recorded: noMatches ? 0 : $input.all().length, no_matches: noMatches } }];"
+      },
+      "id": "c0000000-0000-4000-8000-000000000018",
+      "name": "Return Delivery Summary",
+      "executeOnce": true,
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2420, 0]
+    }
+  ],
+  "connections": {
+    "When B Calls Workflow C": {
+      "main": [[{"node": "Verify Match Event", "type": "main", "index": 0}]]
+    },
+    "Demo Notification Webhook": {
+      "main": [[{"node": "Verify Match Event", "type": "main", "index": 0}]]
+    },
+    "Verify Match Event": {
+      "main": [[{"node": "Fetch Stored Eligible Matches", "type": "main", "index": 0}]]
+    },
+    "Fetch Stored Eligible Matches": {
+      "main": [[{"node": "Apply AWS Demo Recipient Map", "type": "main", "index": 0}]]
+    },
+    "Apply AWS Demo Recipient Map": {
+      "main": [[{"node": "Group Matches and Apply DEMO_RECIPIENTS Allowlist", "type": "main", "index": 0}]]
+    },
+    "Group Matches and Apply DEMO_RECIPIENTS Allowlist": {
+      "main": [[{"node": "Has Notification Matches?", "type": "main", "index": 0}]]
+    },
+    "Has Notification Matches?": {
+      "main": [
+        [{"node": "Recipient Allowed?", "type": "main", "index": 0}],
+        [{"node": "Return Delivery Summary", "type": "main", "index": 0}]
+      ]
+    },
+    "Recipient Allowed?": {
+      "main": [
+        [{"node": "Use Mailpit Local Branch?", "type": "main", "index": 0}],
+        [{"node": "Record Blocked Delivery", "type": "main", "index": 0}]
+      ]
+    },
+    "Record Blocked Delivery": {
+      "main": [[{"node": "Return Delivery Summary", "type": "main", "index": 0}]]
+    },
+    "Use Mailpit Local Branch?": {
+      "main": [
+        [{"node": "Mailpit Local HTTP Delivery", "type": "main", "index": 0}],
+        [{"node": "AWS SES Credential Gate", "type": "main", "index": 0}]
+      ]
+    },
+    "Mailpit Local HTTP Delivery": {
+      "main": [[{"node": "Mark Mailpit Sent", "type": "main", "index": 0}]]
+    },
+    "Mark Mailpit Sent": {
+      "main": [[{"node": "Record Mailpit Delivery", "type": "main", "index": 0}]]
+    },
+    "Record Mailpit Delivery": {
+      "main": [[{"node": "Return Delivery Summary", "type": "main", "index": 0}]]
+    },
+    "AWS SES Credential Gate": {
+      "main": [
+        [{"node": "AWS SES Delivery (credential-gated)", "type": "main", "index": 0}],
+        [{"node": "Mark SES Disabled", "type": "main", "index": 0}]
+      ]
+    },
+    "AWS SES Delivery (credential-gated)": {
+      "main": [[{"node": "Mark SES Sent", "type": "main", "index": 0}]]
+    },
+    "Mark SES Sent": {
+      "main": [[{"node": "Record SES Delivery", "type": "main", "index": 0}]]
+    },
+    "Record SES Delivery": {
+      "main": [[{"node": "Return Delivery Summary", "type": "main", "index": 0}]]
+    },
+    "Mark SES Disabled": {
+      "main": [[{"node": "Record SES Disabled Delivery", "type": "main", "index": 0}]]
+    },
+    "Record SES Disabled Delivery": {
+      "main": [[{"node": "Return Delivery Summary", "type": "main", "index": 0}]]
+    }
+  },
+  "pinData": {}
+}
