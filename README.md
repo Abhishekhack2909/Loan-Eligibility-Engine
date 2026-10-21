@@ -318,9 +318,9 @@ presigned upload -> MinIO -> event-router -> LocalStack SQS
 
 Observed result: one user row was persisted, three public-source products were
 present in `loan_products`, and one `sent` Mailpit delivery was recorded for the
-local fixture recipient `demo@example.test`. The current Workflow B export also
-reports the SQL candidate reduction; rerun the smoke flow after importing that
-export if you need refreshed `naive/candidates/evaluated/stored` evidence.
+controlled local recipient configured through `DEMO_RECIPIENTS`. Workflow B
+reports the SQL candidate reduction using the `naive/candidates/evaluated/stored`
+metrics.
 Workflow A was also executed against the real Discover, NerdWallet, and Prosper
 pages; any failed fetch is explicitly marked and uses a fixture fallback. The
 local LLM stub was used for deterministic offline tests. This does **not** prove
@@ -330,12 +330,8 @@ AWS SES delivery.
 
 For a safe notification demonstration using the existing 10,000-row batch, use
 the checked fixture `tests/fixtures/demo-notification-two-users.json`. It targets
-only two users whose matches are already stored and maps delivery to:
-
-```text
-complexhat735+one@gmail.com
-complexhat735+two@gmail.com
-```
+only two users whose matches are already stored and maps delivery to the two
+controlled aliases configured in `DEMO_RECIPIENTS`.
 
 The users' original `users.email` values remain unchanged in PostgreSQL. The
 demo webhook accepts only one or two explicitly named targets, requires the
@@ -391,9 +387,9 @@ Secrets Manager references, the authenticated API route, and the AWS n8n
 workflow bundle. It writes the API endpoint, controlled demo key, and n8n URL
 to the ignored local file `aws-build/aws-demo-ui.env`; never commit or share
 that file. If a workflow JSON changes after the host was created, sync the
-workflow to the AWS n8n instance and verify a fresh execution before recording;
-the existing n8n data volume is intentionally persistent and is not replaced
-automatically on a normal restart.
+workflow to the AWS n8n instance and verify a fresh execution; the existing n8n
+data volume is intentionally persistent and is not replaced automatically on a
+normal restart.
 Before any expansion, review the existing-RDS network path, dependency layer
 ARN, secret ARNs, API authentication/WAF plan, log/retention cost, S3 lifecycle,
 and data retention.
@@ -415,29 +411,10 @@ configuration loaded from Secrets Manager or the local `.env`; they are not
 required in the workflow exports. The source CSV addresses remain unchanged in
 the `users` table and are never used as AWS demo recipients.
 
-## Demonstration evidence
-
-The assignment video can use the following evidence path:
-
-1. Open `docs/architecture.html` and explain the event-driven architecture.
-2. Upload `tests/fixtures/smoke-users.csv` through the minimal web UI.
-3. Show the AWS stack or S3/EventBridge/SQS resources.
-4. Show Workflow A's schedule, three sources, fallback, extraction, validation,
-   and `loan_products` upsert.
-5. Show Workflow B's signed webhook, `SQL Coarse Filter`, matching code, and
-   `naive/candidates/evaluated/stored` metrics.
-6. Show Workflow C's controlled recipient mapping, SES gate, send, and delivery
-   record.
-7. Show the received message in the controlled test inbox.
-
-The exact console pages and verified upload evidence are in
-[docs/aws-demo-runbook.md](docs/aws-demo-runbook.md). Never expose API tokens,
-presigned URLs, access keys, database passwords, or Secrets Manager values in a
-recording.
-
-The repository contains the assignment's source-code deliverables. The
-demonstration video, collaborator invitations, and submission form are external
-submission steps rather than application configuration.
+The repository contains the assignment's source-code deliverables. The detailed
+AWS evidence path and screen-recording instructions are kept separately in
+[docs/aws-demo-runbook.md](docs/aws-demo-runbook.md), so this README stays
+focused on architecture, setup, behavior, and design decisions.
 
 After submission, stop or delete billable AWS resources and remove temporary
 demo ingress and credentials that are no longer needed.
