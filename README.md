@@ -410,64 +410,37 @@ do not paste them into workflow exports:
 | AWS SES | IAM user `loan-engine-n8n-ses`, region `ap-south-1`, policy limited to `ses:SendEmail` and `ses:SendRawEmail`. |
 | Completion webhook | Shared HMAC secret used by Lambda and Workflow B. |
 
-SES is sandboxed. The verified sender is `complexhat735@gmail.com`, and the
-demo allowlist contains only the controlled aliases
-`complexhat735+one@gmail.com` and `complexhat735+two@gmail.com`. The source
-CSV addresses remain unchanged in the `users` table and are never used as AWS
-demo recipients.
+SES is sandboxed. The sender and controlled recipient aliases are deployment
+configuration loaded from Secrets Manager or the local `.env`; they are not
+required in the workflow exports. The source CSV addresses remain unchanged in
+the `users` table and are never used as AWS demo recipients.
 
-## Demonstration video checklist
+## Demonstration evidence
 
-The required 5–10 minute video should show this order:
+The assignment video can use the following evidence path:
 
-1. `docs/architecture.html` and the event-driven architecture.
-2. The minimal upload UI using `tests/fixtures/smoke-users.csv`.
-3. The AWS CloudFormation stack or S3/EventBridge/SQS evidence.
-4. Workflow A: schedule, three public sources, fixture fallback, criteria
-   extraction, validation, and `loan_products` upsert.
-5. Workflow B execution: signed webhook, `SQL Coarse Filter`, n8n matching,
-   stored candidates, and the `naive/candidates/evaluated/stored` metrics.
-6. Workflow C execution: controlled recipient mapping, SES credential gate,
-   SES send, and delivery record.
-7. The received Gmail message in the controlled test inbox.
+1. Open `docs/architecture.html` and explain the event-driven architecture.
+2. Upload `tests/fixtures/smoke-users.csv` through the minimal web UI.
+3. Show the AWS stack or S3/EventBridge/SQS resources.
+4. Show Workflow A's schedule, three sources, fallback, extraction, validation,
+   and `loan_products` upsert.
+5. Show Workflow B's signed webhook, `SQL Coarse Filter`, matching code, and
+   `naive/candidates/evaluated/stored` metrics.
+6. Show Workflow C's controlled recipient mapping, SES gate, send, and delivery
+   record.
+7. Show the received message in the controlled test inbox.
 
-The AWS runbook contains the exact console pages and the verified upload
-evidence: [docs/aws-demo-runbook.md](docs/aws-demo-runbook.md). Do not show API
-tokens, presigned URLs, access keys, database passwords, or Secrets Manager
-values in the recording.
+The exact console pages and verified upload evidence are in
+[docs/aws-demo-runbook.md](docs/aws-demo-runbook.md). Never expose API tokens,
+presigned URLs, access keys, database passwords, or Secrets Manager values in a
+recording.
 
-## Submission checklist
-
-- [x] Private GitHub repository with source code and configuration.
-- [x] `serverless.yml` for AWS resources.
-- [x] `docker-compose.yml` for the self-hosted n8n environment.
-- [x] JSON exports for Workflows A, B, and C.
-- [x] README architecture, setup, credentials, and design decisions.
-- [x] Offline tests and validation scripts.
-- [ ] Invite the required collaborators manually in GitHub.
-- [ ] Record and upload the 5–10 minute demonstration video.
-- [ ] Submit the repository and video links through the assignment form.
+The repository contains the assignment's source-code deliverables. The
+demonstration video, collaborator invitations, and submission form are external
+submission steps rather than application configuration.
 
 After submission, stop or delete billable AWS resources and remove temporary
-demo ingress/credentials that are no longer needed.
-
-## Collaborator checklist
-
-- [ ] Keep backend, migrations, tests, n8n, web, local, LLM stub, Docker, and
-      Makefile changes in their owners' paths.
-- [ ] Keep the local PostgreSQL/MinIO/event-router/LocalStack/Mailpit/n8n stack
-      reproducible without committing credentials or volumes.
-- [ ] Confirm the event-router preserves the documented normalized local
-      envelope; review the AWS SQS DLQ path separately.
-- [ ] Configure n8n credentials in its local credential store and verify HMAC
-      callback handling before any non-local endpoint is trusted.
-- [ ] Keep Workflow A fixture fallbacks explicitly marked and keep the offline
-      LLM stub enabled for tests.
-- [ ] Verify all deterministic matches are stored before top-K ranking.
-- [ ] Verify actual metrics obey the partition invariant after a replay.
-- [ ] Keep SES disabled for local work; a Mailpit pass is not an SES test.
-- [ ] Obtain explicit approval before any AWS deployment or billable-service
-      experiment.
+demo ingress and credentials that are no longer needed.
 
 ## Troubleshooting and limitations
 
