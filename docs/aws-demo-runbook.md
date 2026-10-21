@@ -292,6 +292,12 @@ recipient: complexhat735+one@gmail.com
 status: sent
 ```
 
+Before recording a new video, verify that the AWS n8n host has the current
+checked-in Workflow B export. The current repository version uses the SQL
+coarse-filter result as the candidate input and reports `naive`, `candidates`,
+`evaluated`, and `stored`. A persistent n8n data volume is not automatically
+reimported when the JSON file changes.
+
 ## 12. Show the n8n execution
 
 Open:
@@ -311,6 +317,15 @@ Email Delivery` execution created by the SES test. Show these nodes:
 6. `Mark SES Sent`
 7. `Record SES Delivery`
 8. `Return Delivery Summary`
+
+Also show the successful Workflow B execution and its metrics. For the
+optimization proof, the important relationship is:
+
+```text
+candidates <= naive
+evaluated = candidates
+stored = evaluated
+```
 
 The returned webhook summary was:
 

@@ -114,6 +114,8 @@ def assert_b(workflow: dict[str, Any]) -> None:
     assert "status !== 'completed'" in text
     assert "EXISTS (SELECT 1 FROM inserted)" in text
     assert "CROSS JOIN loan_products" in text and "sql_candidate" in text
+    assert "candidateRows" in text and "metrics.evaluated !== metrics.candidates" in text
+    assert "p.criteria->>'min_credit_score'" in text and "p.criteria->>'min_monthly_income'" in text
 
 
 def assert_c(workflow: dict[str, Any]) -> None:

@@ -1,9 +1,9 @@
 # Loan Eligibility Engine
 
-The Loan Eligibility Engine accepts a customer CSV, streams validated rows into
-PostgreSQL, evaluates deterministic loan-product criteria, stores the complete
-match set, and lets n8n orchestrate product discovery, ranking, and recipient
-notifications.
+The Loan Eligibility Engine is an end-to-end implementation of the Engineering
+Intern assignment. It accepts a customer CSV, persists validated rows in
+PostgreSQL, discovers personal-loan products, matches users to products, and
+sends a controlled notification through n8n and Amazon SES.
 
 The reproducible default path is **local-only for build and test**. An approved
 assignment sandbox was also deployed in `ap-south-1`; its live evidence and
@@ -11,17 +11,20 @@ screen-recording steps are in [docs/aws-demo-runbook.md](docs/aws-demo-runbook.m
 Do not repeat or expand the AWS deployment without reviewing cost, data, and
 recipient scope.
 
-## Ownership and source of truth
+## What is included
 
-This local integration slice owns:
-
-- `serverless.yml` — plausible AWS S3/EventBridge/SQS/Lambda/IAM/VPC design;
-- `.env.example`, `.gitignore`, `.nvmrc`, and this README;
-- `docs/` — local runbook, workflow contracts, and the interactive architecture
-  diagram;
-- `scripts/infra/` — thin Lambda adapters that reuse backend service ports;
-- the checked-in local worker, Compose wiring, n8n exports, migrations, fixtures,
-  Dockerfile, and Makefile used by the reproducible local path.
+- `serverless.yml` — AWS S3, EventBridge, SQS, Lambda, IAM, VPC, API Gateway,
+  and CloudWatch resources;
+- `docker-compose.yml` — local PostgreSQL, MinIO, LocalStack, n8n, Mailpit,
+  backend, worker, web UI, and offline LLM stub;
+- `aws/` and `scripts/infra/` — the AWS n8n host and sandbox deployment helper;
+- `n8n/01-public-loan-catalog.json`, `n8n/02-ingestion-match.json`, and
+  `n8n/03-email-delivery.json` — the three required n8n workflows;
+- `backend/`, `migrations/`, `tests/`, and `local/` — application logic, schema,
+  tests, fixtures, and reproducible local event wiring;
+- `docs/architecture.html`, `docs/aws-demo-runbook.md`,
+  `docs/local-runbook.md`, and `docs/workflows.md` — diagrams, setup, evidence,
+  and workflow contracts.
 
 ## Architecture
 
@@ -29,10 +32,13 @@ Open [the interactive architecture diagram](docs/architecture.html). Its
 topology shows the AWS target path and the local equivalents side by side:
 
 ```text
-upload client -> optional API -> MinIO/S3 -> object-created event
-             -> event-router/EventBridge -> LocalStack SQS/SQS
-             -> ingestion worker/Lambda -> PostgreSQL/RDS
-             -> n8n Workflows A/B/C -> ranked notification
+browser UI -> API Gateway -> presigned S3 upload -> EventBridge -> SQS
+            -> ingestion Lambda -> private RDS PostgreSQL
+            -> signed private n8n callback -> Workflow B -> Workflow C -> SES
+
+local equivalent:
+browser UI -> FastAPI -> MinIO -> event-router -> LocalStack SQS
+            -> ingestion worker -> PostgreSQL -> n8n Workflows A/B/C -> Mailpit
 ```
 
 For the completed AWS sandbox walkthrough, use
@@ -51,6 +57,21 @@ Secrets Manager-backed webhook secret, the ingestion Lambda sends the same
 signed completion event as the local worker. A callback failure is retryable;
 database idempotency makes the retried CSV safe. The demonstration sandbox
 uses a private VPC callback to the EC2-hosted n8n instance.
+
+## Assignment requirement map
+
+| Assignment requirement | Implementation and evidence |
+| --- | --- |
+| Scalable CSV upload | Browser requests upload metadata, then uploads directly to S3 with a presigned URL. |
+| Event-driven ingestion | S3 object event -> EventBridge -> SQS -> ingestion Lambda. |
+| RDS persistence | Lambda streams and validates rows into `users` in PostgreSQL/RDS. |
+| Self-hosted n8n | Docker Compose locally and an EC2-hosted Docker Compose instance in the AWS demo. |
+| Workflow A | Scheduled public-source discovery with Discover, NerdWallet, Prosper, LLM extraction, validation, and `loan_products` upsert. |
+| Workflow B | Signed webhook, SQL coarse filter, n8n deterministic matching, idempotent `matches` persistence, and metrics. |
+| Optimization challenge | SQL removes impossible pairs before n8n evaluation; the LLM is not called once per user/product pair. |
+| Workflow C | Grouped personalized notification, controlled-recipient allowlist, Mailpit local branch, and AWS SES branch. |
+| Minimal UI | `web/` upload page with asynchronous status polling. |
+| Documentation | Architecture diagram, local runbook, AWS runbook, workflow contract, and this README. |
 
 ## Runtime and dependency pins
 
@@ -180,6 +201,13 @@ API; it does not need an SMTP credential. The optional local model API uses
 and HMAC headers, not a committed credential, and rejects non-completed
 ingestion events.
 
+For the AWS n8n host, the bootstrap script reads the RDS DSN, webhook secret,
+and SES credential from Secrets Manager. It creates the encrypted n8n
+PostgreSQL credential with SSL enabled and the `AWS SES (configure in n8n)`
+credential with region `ap-south-1`. The AWS host enables SES only for the
+controlled aliases and keeps the source CSV email addresses unchanged in RDS.
+Credential values are never exported to GitHub.
+
 ### Workflow A — public product discovery
 
 Workflow A fetches three personal-loan pages when `LOAN_SOURCE_MODE=public`,
@@ -191,15 +219,29 @@ tests use the LLM stub; `LLM_MODE=openai-compatible` uses
 `LLM_API_BASE_URL/chat/completions` with `LLM_MODEL`. The LLM receives public
 product text only and cannot invent an unrecognized matcher criterion silently.
 
-### Workflow B — deterministic eligibility and ranking
+### Workflow B — optimized eligibility and ranking
 
-After the signed ingestion callback, evaluate every user/product pair using
-the known fields and criteria. Persist every deterministic match, including
-`eligible`, `ineligible`, `may_qualify`, and legacy `unknown` decisions. SQL
-provides only the candidate metric; the n8n code evaluates and stores every
-user/product pair. Ranking is a presentation operation over the persisted
-result: top-K changes which rows are shown, not which matches are evaluated or
+After the signed ingestion callback, load the accepted users and active
+products. The `SQL Coarse Filter` applies the cheap structured rules for income,
+credit score, age, and employment status. Only the returned candidate pairs
+reach the n8n Code node. The Code node performs the second-stage deterministic
+check, preserves unknown criteria as `may_qualify`, and stores every evaluated
+candidate. Ranking is a presentation operation over the persisted result:
+`TOP_K` changes which rows are shown, not which candidates are evaluated or
 stored.
+
+The metrics make the optimization visible:
+
+```text
+naive      = accepted users × active products
+candidates = rows returned by SQL Coarse Filter
+evaluated  = candidates
+stored     = evaluated
+```
+
+Therefore `candidates <= naive`, and an LLM is never called once for every
+possible user/product pair. Workflow A may use the LLM for product-criteria
+extraction, but Workflow B uses the cheaper structured filter first.
 
 ### Workflow C — notification
 
@@ -218,11 +260,22 @@ The full node-level contract, credential table, and error handling are in
 
 ## Optimization semantics and actual metrics
 
-The optimization boundary is deliberately narrow:
+The optimization boundary is deliberately explicit:
 
-1. deterministic matching evaluates and stores **all** user/product pairs;
-2. top-K is applied only after persistence, for ranking or notification display;
-3. actual metrics remain calculated from ingestion outcomes and stored matches.
+1. SQL applies cheap structured criteria and removes impossible pairs;
+2. n8n evaluates and stores every remaining candidate;
+3. optional LLM work is limited to product-criteria extraction or ambiguity,
+   never one call per possible user/product pair;
+4. top-K is applied only after candidate persistence, for ranking or
+   notification display.
+
+Workflow B enforces this invariant:
+
+```text
+candidates <= naive
+evaluated = candidates
+stored = evaluated
+```
 
 For ingestion, the invariant is:
 
@@ -249,10 +302,10 @@ never be used to report a smaller actual match count.
    the ingestion worker.
 7. Confirm upload status, then let Workflow A use a public page or its marked
    fixture fallback.
-8. Run Workflow B and inspect that all pairs are persisted before applying
-   top-K.
-  9. Run Workflow C, inspect Mailpit for local mode, or inspect the AWS n8n
-     execution and controlled SES delivery for the AWS demo.
+8. Run Workflow B and inspect the `naive`, `candidates`, `evaluated`, and
+   `stored` metrics. Confirm the SQL stage reduces candidates before matching.
+9. Run Workflow C, inspect Mailpit for local mode, or inspect the AWS n8n
+   execution and controlled SES delivery for the AWS demo.
 
 ### Verified local smoke run
 
@@ -264,12 +317,14 @@ presigned upload -> MinIO -> event-router -> LocalStack SQS
 ```
 
 Observed result: one user row was persisted, three public-source products were
-present in `loan_products`, three deterministic matches were stored, and one
-`sent` Mailpit delivery was recorded for the controlled local recipient
-`demo@example.test`. Workflow A was also executed against the real Discover,
-NerdWallet, and Prosper pages; any failed fetch is explicitly marked and uses a
-fixture fallback. The local LLM stub was used for deterministic offline tests.
-This does **not** prove AWS SES delivery.
+present in `loan_products`, and one `sent` Mailpit delivery was recorded for the
+local fixture recipient `demo@example.test`. The current Workflow B export also
+reports the SQL candidate reduction; rerun the smoke flow after importing that
+export if you need refreshed `naive/candidates/evaluated/stored` evidence.
+Workflow A was also executed against the real Discover, NerdWallet, and Prosper
+pages; any failed fetch is explicitly marked and uses a fixture fallback. The
+local LLM stub was used for deterministic offline tests. This does **not** prove
+AWS SES delivery.
 
 ### Two-user notification-only demo
 
@@ -335,10 +390,66 @@ It provisions the demo n8n EC2 host, private database/security-group access,
 Secrets Manager references, the authenticated API route, and the AWS n8n
 workflow bundle. It writes the API endpoint, controlled demo key, and n8n URL
 to the ignored local file `aws-build/aws-demo-ui.env`; never commit or share
-that file.
+that file. If a workflow JSON changes after the host was created, sync the
+workflow to the AWS n8n instance and verify a fresh execution before recording;
+the existing n8n data volume is intentionally persistent and is not replaced
+automatically on a normal restart.
 Before any expansion, review the existing-RDS network path, dependency layer
 ARN, secret ARNs, API authentication/WAF plan, log/retention cost, S3 lifecycle,
 and data retention.
+
+### AWS n8n credential setup
+
+The AWS demonstration runs n8n in Docker Compose on an EC2 host inside the
+application VPC. The bootstrap process loads these values from Secrets Manager;
+do not paste them into workflow exports:
+
+| n8n credential | AWS configuration |
+| --- | --- |
+| PostgreSQL | Private RDS endpoint, database `loan_engine`, port `5432`, SSL enabled, certificate verification relaxed only for the sandbox demonstration. |
+| AWS SES | IAM user `loan-engine-n8n-ses`, region `ap-south-1`, policy limited to `ses:SendEmail` and `ses:SendRawEmail`. |
+| Completion webhook | Shared HMAC secret used by Lambda and Workflow B. |
+
+SES is sandboxed. The verified sender is `complexhat735@gmail.com`, and the
+demo allowlist contains only the controlled aliases
+`complexhat735+one@gmail.com` and `complexhat735+two@gmail.com`. The source
+CSV addresses remain unchanged in the `users` table and are never used as AWS
+demo recipients.
+
+## Demonstration video checklist
+
+The required 5–10 minute video should show this order:
+
+1. `docs/architecture.html` and the event-driven architecture.
+2. The minimal upload UI using `tests/fixtures/smoke-users.csv`.
+3. The AWS CloudFormation stack or S3/EventBridge/SQS evidence.
+4. Workflow A: schedule, three public sources, fixture fallback, criteria
+   extraction, validation, and `loan_products` upsert.
+5. Workflow B execution: signed webhook, `SQL Coarse Filter`, n8n matching,
+   stored candidates, and the `naive/candidates/evaluated/stored` metrics.
+6. Workflow C execution: controlled recipient mapping, SES credential gate,
+   SES send, and delivery record.
+7. The received Gmail message in the controlled test inbox.
+
+The AWS runbook contains the exact console pages and the verified upload
+evidence: [docs/aws-demo-runbook.md](docs/aws-demo-runbook.md). Do not show API
+tokens, presigned URLs, access keys, database passwords, or Secrets Manager
+values in the recording.
+
+## Submission checklist
+
+- [x] Private GitHub repository with source code and configuration.
+- [x] `serverless.yml` for AWS resources.
+- [x] `docker-compose.yml` for the self-hosted n8n environment.
+- [x] JSON exports for Workflows A, B, and C.
+- [x] README architecture, setup, credentials, and design decisions.
+- [x] Offline tests and validation scripts.
+- [ ] Invite the required collaborators manually in GitHub.
+- [ ] Record and upload the 5–10 minute demonstration video.
+- [ ] Submit the repository and video links through the assignment form.
+
+After submission, stop or delete billable AWS resources and remove temporary
+demo ingress/credentials that are no longer needed.
 
 ## Collaborator checklist
 

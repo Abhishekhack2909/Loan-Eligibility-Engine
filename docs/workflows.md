@@ -40,17 +40,20 @@ local demo useful without claiming that the public site was fetched.
 1. Receive the completed-ingestion callback from the backend and verify the
    `X-N8N-Timestamp` and `X-N8N-Signature` HMAC headers before doing work.
 2. Load every accepted user row for the upload and every active product.
-3. Evaluate every user/product pair with the known criteria only. A failed
-   known criterion produces `ineligible`; an unknown criterion produces
-   `unknown` unless a known criterion has already failed. The result records
+3. Run the `SQL Coarse Filter` with the known income, credit-score, age, and
+   employment criteria. This is the optimization boundary: impossible
+   user/product pairs are removed before n8n code evaluates them.
+4. Evaluate every SQL candidate with n8n code. A failed known criterion produces
+   `ineligible`; an unknown criterion produces `may_qualify`. The result records
    evaluated criteria, unknown criteria, and reasons.
-4. Store **all deterministic matches** in `matches`, including ineligible and
-   unknown decisions. The unique pair constraint makes a replay safe.
- 5. Calculate actual metrics from persisted outcomes. Ranking is a later view
-   over those stored matches: `TOP_K` limits displayed recommendations only;
-   it never limits evaluation, persistence, or metrics.
-6. Pass the selected presentation rows to Workflow C without deleting or
-   rewriting the complete match set.
+5. Store every evaluated candidate in `matches`. The unique pair constraint
+   makes a replay safe. Known-rejected pairs do not need a full n8n/LLM pass
+   because the SQL stage already rejected them.
+6. Calculate actual metrics from persisted candidate outcomes. Ranking is a
+   later view over those stored matches: `TOP_K` limits displayed
+   recommendations only; it never limits candidate evaluation or persistence.
+7. Pass the selected presentation rows to Workflow C without deleting or
+   rewriting the stored candidate match set.
 
 The AWS ingestion Lambda sends the signed `users.ingestion.completed` callback
 after database persistence when both `N8N_COMPLETION_WEBHOOK_URL` and the
@@ -66,6 +69,18 @@ For every ingestion attempt, the counters must satisfy:
 total_rows = inserted_rows + duplicate_rows + invalid_rows + failed_rows
 accepted_rows = inserted_rows + duplicate_rows
 ```
+
+For Workflow B, the optimization metrics have a separate invariant:
+
+```text
+candidates <= naive
+evaluated = candidates
+stored = evaluated
+```
+
+Here `naive` is `accepted_users * active_products`. `candidates` is the number
+of rows returned by the SQL coarse filter. This makes the reduction visible in
+the n8n execution data and prevents an LLM call for every possible pair.
 
 Repeated emails are not a reason to drop rows. User identity remains the upload
 batch plus source row, while normalized recipient handling protects the email
