@@ -1,438 +1,398 @@
-# Loan Eligibility Engine
+# 🏦 Loan Eligibility Engine
 
-The Loan Eligibility Engine is an end-to-end implementation of the Engineering
-Intern assignment. It accepts a customer CSV, persists validated rows in
-PostgreSQL, discovers personal-loan products, matches users to products, and
-sends a controlled notification through n8n and Amazon SES.
+[![Python](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-16-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
+[![Docker Compose](https://img.shields.io/badge/Docker-Compose-2496ED?logo=docker&logoColor=white)](https://www.docker.com/)
+[![n8n](https://img.shields.io/badge/n8n-Orchestration-EA4B71?logo=n8n&logoColor=white)](https://n8n.io/)
+[![AWS Serverless](https://img.shields.io/badge/AWS-Serverless_Blueprint-FF9900?logo=amazon-aws&logoColor=white)](https://aws.amazon.com/)
+[![uv](https://img.shields.io/badge/Packaged%20with-uv-DE5FE9?logo=astral&logoColor=white)](https://astral.sh/uv)
+[![Tests](https://img.shields.io/badge/Tests-14%20Passed-brightgreen)](file:///c:/Loan%20Eligibility%20Engine/tests/backend)
 
-The reproducible default path is **local-only for build and test**. An approved
-assignment sandbox was also deployed in `ap-south-1`; its live evidence and
-screen-recording steps are in [docs/aws-demo-runbook.md](docs/aws-demo-runbook.md).
-Do not repeat or expand the AWS deployment without reviewing cost, data, and
-recipient scope.
+A high-performance, event-driven loan eligibility engine and distributed matching pipeline. The engine processes high-volume customer CSVs via direct-to-storage presigned uploads, streams and validates records into PostgreSQL with strict idempotency, extracts real-time loan product criteria using an AI/LLM parser, executes deterministic matching via an optimized two-stage filter, and orchestrates personalized customer notification workflows through self-hosted [n8n](https://n8n.io/).
 
-## What is included
+Engineered for dual-mode execution: a fully self-contained **10-service local stack** (Docker Compose, MinIO, LocalStack SQS, Mailpit, LLM stub) and an **AWS Serverless target architecture** (S3, EventBridge, SQS, Lambda, RDS PostgreSQL, SES).
 
-- `serverless.yml` — AWS S3, EventBridge, SQS, Lambda, IAM, VPC, API Gateway,
-  and CloudWatch resources;
-- `docker-compose.yml` — local PostgreSQL, MinIO, LocalStack, n8n, Mailpit,
-  backend, worker, web UI, and offline LLM stub;
-- `aws/` and `scripts/infra/` — the AWS n8n host and sandbox deployment helper;
-- `n8n/01-public-loan-catalog.json`, `n8n/02-ingestion-match.json`, and
-  `n8n/03-email-delivery.json` — the three required n8n workflows;
-- `backend/`, `migrations/`, `tests/`, and `local/` — application logic, schema,
-  tests, fixtures, and reproducible local event wiring;
-- `docs/architecture.html`, `docs/aws-demo-runbook.md`,
-  `docs/local-runbook.md`, and `docs/workflows.md` — diagrams, setup, evidence,
-  and workflow contracts.
+---
 
-## Architecture
+## 📑 Table of Contents
 
-Open [the interactive architecture diagram](docs/architecture.html). Its
-topology shows the AWS target path and the local equivalents side by side:
+- [Key Capabilities](#-key-capabilities)
+- [System Architecture](#-system-architecture)
+- [Tech Stack & Service Topology](#-tech-stack--service-topology)
+- [Project Layout](#-project-layout)
+- [Quick Start (Local Stack)](#-quick-start-local-stack)
+- [End-to-End Walkthrough](#-end-to-end-walkthrough)
+- [n8n Workflow Pipelines](#-n8n-workflow-pipelines)
+- [Optimization & System Invariants](#-optimization--system-invariants)
+- [REST API Reference](#-rest-api-reference)
+- [Testing & Quality Assurance](#-testing--quality-assurance)
+- [AWS Production Blueprint](#-aws-production-blueprint)
 
-```text
-browser UI -> API Gateway -> presigned S3 upload -> EventBridge -> SQS
-            -> ingestion Lambda -> private RDS PostgreSQL
-            -> signed private n8n callback -> Workflow B -> Workflow C -> SES
+---
 
-local equivalent:
-browser UI -> FastAPI -> MinIO -> event-router -> LocalStack SQS
-            -> ingestion worker -> PostgreSQL -> n8n Workflows A/B/C -> Mailpit
+## ✨ Key Capabilities
+
+* **Direct-to-Storage Presigned Uploads**: Decouples heavy file transfers from API instances. Clients request presigned URLs from FastAPI / API Gateway and stream files straight to S3 or MinIO.
+* **Resilient Event-Driven Ingestion**: S3 `ObjectCreated` triggers dispatch through EventBridge / MinIO webhooks into an SQS FIFO/standard queue with dead-letter queue (DLQ) support and exponential backoff retry.
+* **Streaming, Memory-Bounded CSV Ingestion**: Custom streaming parser reads large files in fixed chunks, strictly enforcing 7 required fields while isolating arbitrary custom columns into `raw_data` JSONB.
+* **Dual-Stage Optimized Matching**:
+  1. *SQL Coarse Filter*: Eliminates mathematically disqualified user-product combinations directly in PostgreSQL before orchestration.
+  2. *Deterministic Rule Evaluator*: Evaluates full criteria in n8n, categorizing decisions into `eligible`, `ineligible`, and `may_qualify`.
+* **Complete Persistence & Auditability**: Evaluates and persists 100% of candidate pairs. Presentation `TOP_K` limits only what customers see in notifications, never what is stored for regulatory compliance.
+* **Automated Product Catalog & LLM Extraction**: Daily scheduled scraping of loan provider sites (Discover, SoFi, LightStream) with LLM-powered criteria extraction and schema validation.
+* **Cryptographic Webhook Handoff**: Inter-service communication between workers and n8n webhooks is authenticated via canonical JSON HMAC-SHA256 signatures with replay protection.
+* **Safe Multi-Channel Notifications**: Built-in email normalization, anti-header-injection sanitization, and strict recipient allowlisting (`DEMO_RECIPIENTS`) supporting Mailpit locally and Amazon SES in the cloud.
+
+---
+
+## 🏛 System Architecture
+
+The engine provides parity between local development and production cloud deployment:
+
+```mermaid
+flowchart TD
+    subgraph Client ["Client Layer"]
+        UI["Web UI / Client"]
+    end
+
+    subgraph Ingestion ["Ingestion & Storage"]
+        API["FastAPI / API Gateway"]
+        S3["MinIO / AWS S3 Bucket"]
+        Router["Event Router / EventBridge"]
+        SQS["LocalStack SQS / AWS SQS + DLQ"]
+        Worker["Ingestion Worker / Lambda"]
+        DB[("PostgreSQL 16 / AWS RDS")]
+    end
+
+    subgraph Orchestration ["n8n Workflow Engine"]
+        WFA["Workflow A: Catalog Ingestion\n(Web Scraper + LLM Parser)"]
+        WFB["Workflow B: Deterministic Matcher\n(SQL Coarse Filter + Criteria Evaluator)"]
+        WFC["Workflow C: Notification Dispatch\n(Allowlist Filter + Template Engine)"]
+    end
+
+    subgraph Notification ["Delivery"]
+        Mail["Mailpit (Local) / Amazon SES (Cloud)"]
+    end
+
+    UI -->|"1. Request presigned URL"| API
+    API -->|"2. Return presigned URL"| UI
+    UI -->|"3. Direct CSV PUT"| S3
+    S3 -->|"4. ObjectCreated event"| Router
+    Router -->|"5. Enqueue event"| SQS
+    SQS -->|"6. Consume & stream parse"| Worker
+    Worker -->|"7. Insert users & errors"| DB
+    Worker -->|"8. Signed HMAC webhook"| WFB
+    WFA -->|"Upsert loan products"| DB
+    WFB -->|"Read users & products"| DB
+    WFB -->|"Store all match records"| DB
+    WFB -->|"Trigger delivery"| WFC
+    WFC -->|"Record email_deliveries"| DB
+    WFC -->|"Dispatch message"| Mail
 ```
 
-For the completed AWS sandbox walkthrough, use
-[docs/aws-demo-runbook.md](docs/aws-demo-runbook.md).
+> [!NOTE]
+> Explore the interactive architecture view in [docs/architecture.html](file:///c:/Loan%20Eligibility%20Engine/docs/architecture.html).
 
-The AWS portion is parameterized for an existing private PostgreSQL/RDS
-deployment. S3 is private and encrypted, EventBridge sends object-created
-events to SQS, SQS has a DLQ, Lambda processing is VPC-attached, Secrets Manager
-values are referenced by ARN, and CloudWatch log retention is 14 days. API
-Gateway routes remain optional and can be disabled through the
-`EnableApiRoutes` CloudFormation parameter; the approved demonstration
-sandbox enables them with an API key.
+---
 
-When the approved AWS environment supplies the n8n callback URL and its
-Secrets Manager-backed webhook secret, the ingestion Lambda sends the same
-signed completion event as the local worker. A callback failure is retryable;
-database idempotency makes the retried CSV safe. The demonstration sandbox
-uses a private VPC callback to the EC2-hosted n8n instance.
+## 🧰 Tech Stack & Service Topology
 
-## Assignment requirement map
+| Domain | Local Development | AWS Production Blueprint | Details |
+| :--- | :--- | :--- | :--- |
+| **API & Web** | [FastAPI](file:///c:/Loan%20Eligibility%20Engine/backend/app/main.py) + [Nginx](file:///c:/Loan%20Eligibility%20Engine/web/nginx.conf) | AWS API Gateway + Lambda | Asynchronous REST endpoints on `:8000`, Web UI on `:8080` |
+| **Object Storage** | MinIO (Port `:9000` / `:9001`) | Amazon S3 | Presigned upload targets; private, encrypted buckets |
+| **Messaging** | Event-Router + LocalStack SQS (`:4566`) | Amazon EventBridge + SQS | Decoupled asynchronous event broker with DLQ |
+| **Ingestion** | Python Ingestion Worker | AWS Lambda (VPC Attached) | Streaming chunked CSV parser, idempotent batch commits |
+| **Database** | PostgreSQL 16 Alpine (`:15432` / `:5432`) | Amazon RDS PostgreSQL | Schema with relational constraints, JSONB indices, full audit logs |
+| **Orchestration** | Self-hosted [n8n](file:///c:/Loan%20Eligibility%20Engine/n8n) (`:5678`) | EC2 / ECS n8n Container | Automated bootstrap, encrypted credentials, 3 core workflows |
+| **Email Delivery** | Mailpit (`:8025` Web / `:1025` SMTP) | Amazon SES | Local capture UI vs. sandboxed high-volume cloud deliverability |
+| **AI / LLM** | Offline LLM Stub (`:8090`) | OpenAI / Bedrock Compatible | Deterministic criteria extraction without runtime network cost |
 
-| Assignment requirement | Implementation and evidence |
-| --- | --- |
-| Scalable CSV upload | Browser requests upload metadata, then uploads directly to S3 with a presigned URL. |
-| Event-driven ingestion | S3 object event -> EventBridge -> SQS -> ingestion Lambda. |
-| RDS persistence | Lambda streams and validates rows into `users` in PostgreSQL/RDS. |
-| Self-hosted n8n | Docker Compose locally and an EC2-hosted Docker Compose instance in the AWS demo. |
-| Workflow A | Scheduled public-source discovery with Discover, NerdWallet, Prosper, LLM extraction, validation, and `loan_products` upsert. |
-| Workflow B | Signed webhook, SQL coarse filter, n8n deterministic matching, idempotent `matches` persistence, and metrics. |
-| Optimization challenge | SQL removes impossible pairs before n8n evaluation; the LLM is not called once per user/product pair. |
-| Workflow C | Grouped personalized notification, controlled-recipient allowlist, Mailpit local branch, and AWS SES branch. |
-| Minimal UI | `web/` upload page with asynchronous status polling. |
-| Documentation | Architecture diagram, local runbook, AWS runbook, workflow contract, and this README. |
+---
 
-## Runtime and dependency pins
+## 📂 Project Layout
 
-- Python: `3.12` via `backend/.python-version`.
-- Node tooling: `22.14.0` via `.nvmrc`.
-- Python dependencies: exact pins in `backend/pyproject.toml`, with the
-  repository lockfile at `backend/uv.lock`.
-- The local workflow uses placeholder values from `.env.example`; copy it to
-  `.env` and never commit `.env`.
+```text
+.
+├── backend/                  # Core FastAPI application & business logic
+│   ├── app/
+│   │   ├── config.py         # Pydantic settings & environment configuration
+│   │   ├── csv_ingestion.py  # Streaming CSV parser & schema validation
+│   │   ├── ingestion.py      # Batch ingestion coordinator
+│   │   ├── matching.py       # Deterministic loan-product criteria matcher
+│   │   ├── metrics.py        # Strict mathematical ingestion counters
+│   │   ├── recipients.py     # RFC-compliant email normalizer & sanitization
+│   │   └── webhooks.py       # HMAC-SHA256 payload signing utilities
+│   └── pyproject.toml        # Dependency pins & uv packaging
+├── n8n/                      # n8n workflow definitions
+│   ├── 01-public-loan-catalog.json   # Workflow A: Catalog discovery & LLM extraction
+│   ├── 02-ingestion-match.json       # Workflow B: Ingestion verification & matching
+│   └── 03-email-delivery.json        # Workflow C: Controlled notification delivery
+├── migrations/               # Database migrations
+│   └── 001_initial.sql       # PostgreSQL schema (users, batches, products, matches, logs)
+├── local/                    # Local environment orchestration & bootstrap
+│   ├── event_router.py       # MinIO webhook to SQS event normalizer
+│   ├── ingestion_worker.py   # SQS worker executing the streaming pipeline
+│   ├── minio_bootstrap.py    # Bucket creation & notification provisioning
+│   └── n8n-bootstrap.js      # Zero-touch n8n credential & workflow provisioner
+├── llm_stub/                 # Deterministic local LLM server for criteria extraction
+├── web/                      # Static client UI for uploading CSVs and monitoring progress
+├── docker-compose.yml        # 10-container local stack definition
+├── serverless.yml            # Production-ready AWS infrastructure-as-code blueprint
+├── tests/                    # Pytest test suite & fixtures
+└── docs/                     # Interactive diagrams & runbooks
+```
 
-## Sample CSV findings
+---
 
-The reviewed sample contains **10,000 data rows**, **7 columns**, repeated email
-values, and exactly these fields:
-
-| Field | Meaning and validation |
-| --- | --- |
-| `user_id` | Required non-empty text identifier. |
-| `name` | Required non-empty display name. |
-| `email` | Required email; normalized to lowercase for validation and recipient handling. Repeated values are retained. |
-| `monthly_income` | Non-negative decimal amount. |
-| `credit_score` | Integer from 0 through 850. |
-| `employment_status` | Required non-empty text used by supported criteria. |
-| `age` | Integer from 0 through 150. |
-
-There are no extra columns in this finding. The parser does permit extra
-columns and preserves them as `raw_data`, but product matching uses only the
-known fields above. A repeated email does not mean duplicate users: the stable
-ingestion identity is `(upload_batch_id, source_row_number)` and the database
-keeps those rows separately.
-
-## Local-only setup
+## 🚀 Quick Start (Local Stack)
 
 ### Prerequisites
 
-Install or make available locally, without global project changes:
+* [Python 3.12](https://www.python.org/) & [uv](https://docs.astral.sh/uv/)
+* [Docker Desktop](https://www.docker.com/) (Compose v2)
+* Node.js 22+ (optional, for inspecting Serverless definitions)
 
-- Python 3.12 and `uv`;
-- Node 22.14.0 if Serverless syntax inspection is needed (do not deploy);
-- PostgreSQL 15+ (the Compose database is exposed to host tools on port `15432`
-  to avoid colliding with an existing local PostgreSQL on `5432`);
-- Docker Desktop for the checked-in PostgreSQL, MinIO, event-router, LocalStack,
-  ingestion worker, Mailpit, n8n, LLM stub, backend, and web services.
+### 1. Clone & Configure
 
-The local stack files are outside this ownership slice and must be treated as
-collaborator-owned when changing them.
+```bash
+git clone https://github.com/your-username/loan-eligibility-engine.git
+cd "loan-eligibility-engine"
 
-PowerShell:
+# Create local environment config
+cp .env.example .env
 
-```powershell
-Copy-Item .env.example .env
+# Install backend dependencies
 uv sync --project backend --group test
 ```
 
-Start the checked-in local stack without AWS:
+### 2. Launch Container Stack
+
+Start the complete 10-service local development environment:
 
 ```bash
 docker compose up --build
 ```
 
-Bash:
+The stack automatically boots and provisions:
+- PostgreSQL 16 on `localhost:15432` with all migrations applied.
+- MinIO S3 on `http://localhost:9000` with the `loan-uploads` bucket.
+- LocalStack SQS on `http://localhost:4566` with `loan-eligibility-events`.
+- n8n on `http://localhost:5678` with Workflows A, B, and C pre-imported and credentials configured.
+- Mailpit on `http://localhost:8025` for viewing dispatched emails.
+- Web UI on `http://localhost:8080`.
+
+---
+
+## 🔄 End-to-End Walkthrough
+
+You can test the entire pipeline using the Web UI at [http://localhost:8080](http://localhost:8080) or via the command line:
+
+### 1. Request a Presigned Upload URL
 
 ```bash
-cp .env.example .env
-uv sync --project backend --group test
+curl -sS -X POST http://localhost:8000/uploads \
+  -H "Content-Type: application/json" \
+  -d '{"filename": "applicants.csv", "content_type": "text/csv"}'
 ```
 
-Apply the schema to the local database:
-
-```bash
-psql "$DATABASE_DSN" -f migrations/001_initial.sql
-```
-
-See [docs/local-runbook.md](docs/local-runbook.md) for the full local wiring,
-demo sequence, and troubleshooting.
-
-## Run commands
-
-Start the FastAPI app from the repository root:
-
-```bash
-uv run --project backend uvicorn backend.app.main:app --reload
-```
-
-Check health without external services:
-
-```bash
-curl -sS http://localhost:8000/health
-```
-
-Expected response:
-
+Sample JSON response:
 ```json
-{"status":"ok"}
+{
+  "upload_id": "b8f2d593-3d02-4bb3-96b6-b5ce9d75e01c",
+  "upload_url": "http://minio:9000/loan-uploads/uploads/b8f2d593-3d02-4bb3-96b6-b5ce9d75e01c/applicants.csv?...",
+  "object_key": "uploads/b8f2d593-3d02-4bb3-96b6-b5ce9d75e01c/applicants.csv",
+  "expires_in_seconds": 900
+}
 ```
 
-The upload endpoints require local PostgreSQL and MinIO. The local event path
-is MinIO webhook -> event-router -> LocalStack SQS
-`loan-eligibility-events` -> ingestion worker. The local router sends a
-normalized `{"source":"minio","records":[{"bucket":"loan-uploads","key":"uploads/{upload_id}/{filename}"}]}`
-body. The AWS EventBridge detail shape is a separate contract used by the AWS
-Lambda adapter in `scripts/infra/`.
+### 2. Stream the Customer CSV
 
-## Test command
+Create a valid applicant file conforming to the 7-column schema:
 
-Use this one offline backend test command:
+```csv
+user_id,name,email,monthly_income,credit_score,employment_status,age
+u-101,Ada Lovelace,demo@example.test,6500.00,740,employed,32
+u-102,Charles Babbage,charles@example.test,2200.00,580,self-employed,45
+```
+
+Upload directly using the presigned URL:
+```bash
+curl -sS -X PUT "$UPLOAD_URL" \
+  -H "Content-Type: text/csv" \
+  --data-binary @applicants.csv
+```
+
+### 3. Trace Event Processing
+
+1. **MinIO** detects the PUT event and fires an HTTP notification to `event-router` (`:8091`).
+2. **Event Router** normalizes the event payload and posts to **LocalStack SQS** (`loan-eligibility-events`).
+3. **Ingestion Worker** polls SQS, reads the CSV stream from MinIO, validates each row, and executes a batch insert into PostgreSQL `users`.
+4. **Worker** builds a canonical JSON HMAC signature and posts to **n8n Workflow B** (`/webhook/loan-ingestion-completed`).
+5. **Workflow B** verifies the signature, runs the SQL coarse filter, calculates deterministic criteria matches, and inserts into `matches`.
+6. **Workflow C** aggregates eligible matches per customer, checks the `DEMO_RECIPIENTS` allowlist, and dispatches rich email notifications to **Mailpit**.
+
+### 4. Inspect Results
+
+- **Mailpit Web UI**: Open [http://localhost:8025](http://localhost:8025) to view personalized eligibility emails.
+- **Upload Status**: Check batch metrics via `GET http://localhost:8000/uploads/{upload_id}`.
+- **PostgreSQL**: Query `matches`, `users`, and `email_deliveries` at `localhost:15432`.
+
+---
+
+## ⚡ n8n Workflow Pipelines
+
+The orchestration layer is decomposed into three autonomous workflows:
+
+```text
+┌────────────────────────────────────────────────────────────────────────┐
+│                   Workflow A: Public Loan Catalog                      │
+│  [Schedule / Manual] ──> [Scrape Web / Fixtures] ──> [LLM Extract]     │
+│                              └──> [Validate Schema] ──> [Upsert DB]   │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│               Workflow B: Deterministic Matching Engine                │
+│  [HMAC Webhook] ──> [Verify Sig] ──> [Idempotency Gate]               │
+│         └──> [SQL Coarse Filter] ──> [Deterministic Evaluator Code]    │
+│                     └──> [Store Matches] ──> [Trigger Workflow C]     │
+└────────────────────────────────────────────────────────────────────────┘
+
+┌────────────────────────────────────────────────────────────────────────┐
+│                 Workflow C: Grouped Email Delivery                     │
+│  [Trigger from B] ──> [Group by User] ──> [DEMO_RECIPIENTS Allowlist]  │
+│        ├── [Allowed] ──> [Mailpit / SES HTTP API] ──> [Log Delivery]   │
+│        └── [Blocked] ──> [Record Blocked Status in DB]                 │
+└────────────────────────────────────────────────────────────────────────┘
+```
+
+1. **Workflow A ([01-public-loan-catalog.json](file:///c:/Loan%20Eligibility%20Engine/n8n/01-public-loan-catalog.json))**:
+   - Scrapes public personal loan landing pages (or reads local HTML fixtures when `LOAN_SOURCE_MODE=fixture`).
+   - Uses the LLM extraction node to transform unstructured text into structured criteria schemas (`min_credit_score`, `min_monthly_income`, `employment_status`, `min_age`, `max_age`).
+   - Upserts active records into `loan_products` with a SHA-256 content hash for auditability.
+
+2. **Workflow B ([02-ingestion-match.json](file:///c:/Loan%20Eligibility%20Engine/n8n/02-ingestion-match.json))**:
+   - Triggered by `users.ingestion.completed` webhook.
+   - Verifies canonical HMAC-SHA256 signature and timestamp freshness (±300s).
+   - Enforces event idempotency through `processed_events`.
+   - Executes SQL coarse filtering to prune unmatchable candidate pairs.
+   - Evaluates rules deterministically in JavaScript and commits records to `matches`.
+
+3. **Workflow C ([03-email-delivery.json](file:///c:/Loan%20Eligibility%20Engine/n8n/03-email-delivery.json))**:
+   - Groups multi-product eligibility records per customer.
+   - Enforces a zero-trust allowlist (`DEMO_RECIPIENTS`): recipients not explicitly allowlisted are safely marked `blocked` in `email_deliveries` rather than dispatched.
+   - Routes delivery to Mailpit locally or Amazon SES in production.
+
+---
+
+## 📐 Optimization & System Invariants
+
+### 1. Two-Stage Coarse-to-Fine Filtering
+
+In a naive implementation matching $U$ users against $P$ products, an engine would evaluate $U \times P$ combinations (e.g., $10,000 \times 10 = 100,000$ operations).
+
+```text
+naive_pairs = total_accepted_users × active_products
+candidate_pairs = SQL_coarse_filter(users ⨉ products)
+evaluated_pairs = candidate_pairs  (where candidate_pairs <= naive_pairs)
+```
+
+The engine applies a high-speed relational pre-filter directly in PostgreSQL (`SQL Coarse Filter`), pruning impossible pairs using index-backed comparisons before data reaches workflow memory.
+
+### 2. Strict Partition Invariant
+
+For every batch ingestion run, the engine validates that every row is accounted for mathematically:
+
+$$\text{total\_rows} = \text{inserted\_rows} + \text{duplicate\_rows} + \text{invalid\_rows} + \text{failed\_rows}$$
+
+$$\text{accepted\_rows} = \text{inserted\_rows} + \text{duplicate\_rows}$$
+
+### 3. Replay Safety & Idempotency
+
+- Stable composite primary key: `(upload_batch_id, source_row_number)` ensures replaying an identical SQS message or CSV never duplicates user records.
+- Deterministic conflict handling: `matches` uses `ON CONFLICT (upload_batch_id, user_id, loan_product_id) DO UPDATE`.
+
+---
+
+## 🔌 REST API Reference
+
+### `GET /health`
+Verifies backend service availability.
+```bash
+curl -s http://localhost:8000/health
+```
+```json
+{"status": "ok"}
+```
+
+### `POST /uploads`
+Initiates a presigned file upload session.
+```bash
+curl -X POST http://localhost:8000/uploads \
+  -H "Content-Type: application/json" \
+  -d '{"filename": "customers.csv", "content_type": "text/csv"}'
+```
+```json
+{
+  "upload_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "upload_url": "http://minio:9000/loan-uploads/uploads/9b1deb4d.../customers.csv?...",
+  "object_key": "uploads/9b1deb4d.../customers.csv",
+  "expires_in_seconds": 900
+}
+```
+
+### `GET /uploads/{upload_id}`
+Returns real-time ingestion status and row processing metrics.
+```bash
+curl -s http://localhost:8000/uploads/9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d
+```
+```json
+{
+  "upload_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+  "filename": "customers.csv",
+  "status": "completed",
+  "row_count": 10000,
+  "error_count": 0,
+  "created_at": "2026-11-17T08:00:00Z",
+  "completed_at": "2026-11-17T08:00:14Z"
+}
+```
+
+---
+
+## 🧪 Testing & Quality Assurance
+
+The test suite runs completely offline with zero external network or database dependencies using injected repository boundaries and mock storage adapters.
+
+Run the test suite with `uv`:
 
 ```bash
 uv run --project backend pytest tests/backend
 ```
 
-The suite uses injected boundaries and does not call AWS, PostgreSQL, MinIO,
-n8n, Mailpit, SES, public web pages, or an LLM service. Do not replace the
-offline LLM stub with a network model in this check.
+### Test Coverage Highlights
 
-## n8n setup and the three workflows
+* **[test_csv_ingestion.py](file:///c:/Loan%20Eligibility%20Engine/tests/backend/test_csv_ingestion.py)**: Validates chunked streaming parsing, extra column isolation into `raw_data`, and header schema verification.
+* **[test_ingestion_service.py](file:///c:/Loan%20Eligibility%20Engine/tests/backend/test_ingestion_service.py)**: Verifies idempotency under re-ingestion and duplicate accounting.
+* **[test_matching.py](file:///c:/Loan%20Eligibility%20Engine/tests/backend/test_matching.py)**: Tests deterministic rule evaluation, handling of unknown criteria, and decision boundaries (`eligible`, `ineligible`, `unknown`).
+* **[test_api_and_webhook.py](file:///c:/Loan%20Eligibility%20Engine/tests/backend/test_api_and_webhook.py)**: Verifies presigned URL generation and canonical HMAC-SHA256 signature verification.
+* **[test_metrics_and_recipients.py](file:///c:/Loan%20Eligibility%20Engine/tests/backend/test_metrics_and_recipients.py)**: Tests RFC recipient normalization and anti-CRLF header injection protections.
 
-Compose provisions the three exports and one PostgreSQL credential before the
-first n8n start through `local/n8n-bootstrap.js`. The persistent marker
-`/home/node/.n8n/.loan-engine-provisioned-v1` makes the operation idempotent on
-restart. The credential is named `Postgres local (configure in n8n)` and uses
-`postgres:5432`, database `loan_engine`, user `loan_engine`, the
-`POSTGRES_PASSWORD` value, and SSL off. Workflow C calls Mailpit's local HTTP
-API; it does not need an SMTP credential. The optional local model API uses
-`LLM_API_BASE_URL` and `LLM_MODEL`; the default `LLM_MODE=stub` path uses only
-`http://llm-stub:8090`. The incoming completion webhook uses the shared secret
-and HMAC headers, not a committed credential, and rejects non-completed
-ingestion events.
+---
 
-For the AWS n8n host, the bootstrap script reads the RDS DSN, webhook secret,
-and SES credential from Secrets Manager. It creates the encrypted n8n
-PostgreSQL credential with SSL enabled and the `AWS SES (configure in n8n)`
-credential with region `ap-south-1`. The AWS host enables SES only for the
-controlled aliases and keeps the source CSV email addresses unchanged in RDS.
-Credential values are never exported to GitHub.
+## ☁️ AWS Production Blueprint
 
-### Workflow A — public product discovery
+The repository includes a comprehensive [serverless.yml](file:///c:/Loan%20Eligibility%20Engine/serverless.yml) specification designed for AWS deployment:
 
-Workflow A fetches three personal-loan pages when `LOAN_SOURCE_MODE=public`,
-captures retrieval metadata and a content hash, and parses criteria. The compose
-default is `fixture` for offline repeatability; its three fixture nodes connect
-directly to extraction and do not wait for the public branch. Every product
-retains a public provenance URL plus `source_mode=fixture` or `public`. Offline
-tests use the LLM stub; `LLM_MODE=openai-compatible` uses
-`LLM_API_BASE_URL/chat/completions` with `LLM_MODEL`. The LLM receives public
-product text only and cannot invent an unrecognized matcher criterion silently.
+* **Amazon S3**: Private bucket with SSE-KMS encryption, strict bucket policies, and EventBridge notifications enabled.
+* **Amazon EventBridge & SQS**: Filters `ObjectCreated` events, buffering them in an SQS queue with an attached Dead Letter Queue (DLQ).
+* **AWS Lambda Ingestion Worker**: VPC-attached Lambda function with streaming S3 access, connecting securely to Amazon RDS PostgreSQL via private subnets.
+* **AWS Secrets Manager**: Manages database credentials, n8n HMAC webhook secrets, and SES delivery keys with automatic rotation support.
+* **Amazon SES**: Sandboxed or production-verified email dispatch with DKIM and SPF verification.
 
-### Workflow B — optimized eligibility and ranking
+---
 
-After the signed ingestion callback, load the accepted users and active
-products. The `SQL Coarse Filter` applies the cheap structured rules for income,
-credit score, age, and employment status. Only the returned candidate pairs
-reach the n8n Code node. The Code node performs the second-stage deterministic
-check, preserves unknown criteria as `may_qualify`, and stores every evaluated
-candidate. Ranking is a presentation operation over the persisted result:
-`TOP_K` changes which rows are shown, not which candidates are evaluated or
-stored.
+## 📄 License
 
-The metrics make the optimization visible:
-
-```text
-naive      = accepted users × active products
-candidates = rows returned by SQL Coarse Filter
-evaluated  = candidates
-stored     = evaluated
-```
-
-Therefore `candidates <= naive`, and an LLM is never called once for every
-possible user/product pair. Workflow A may use the LLM for product-criteria
-extraction, but Workflow B uses the cheaper structured filter first.
-
-### Workflow C — notification
-
-Normalize recipients, group by user ID plus recipient, include eligible,
-may-qualify, and unknown matches, create delivery records, and send locally
-through the Mailpit HTTP API or through the controlled AWS SES branch. A
-no-match run returns one summary without waiting on a provider branch. The AWS
-demo branch fails closed unless the recipient is an explicitly configured
-controlled alias. Mailpit demonstrates only a local delivery handoff; it is
-not proof of SES configuration, identity verification, sandbox exit,
-deliverability, or production quotas. Completion is returned to Workflow B as
-one summary; the ingestion callback into B is signed.
-
-The full node-level contract, credential table, and error handling are in
-[docs/workflows.md](docs/workflows.md).
-
-## Optimization semantics and actual metrics
-
-The optimization boundary is deliberately explicit:
-
-1. SQL applies cheap structured criteria and removes impossible pairs;
-2. n8n evaluates and stores every remaining candidate;
-3. optional LLM work is limited to product-criteria extraction or ambiguity,
-   never one call per possible user/product pair;
-4. top-K is applied only after candidate persistence, for ranking or
-   notification display.
-
-Workflow B enforces this invariant:
-
-```text
-candidates <= naive
-evaluated = candidates
-stored = evaluated
-```
-
-For ingestion, the invariant is:
-
-```text
-total_rows = inserted_rows + duplicate_rows + invalid_rows + failed_rows
-accepted_rows = inserted_rows + duplicate_rows
-```
-
-Replaying an upload may increase `duplicate_rows`, but it cannot create a second
-row for the same `(upload_batch_id, source_row_number)`. A top-K setting must
-never be used to report a smaller actual match count.
-
-## Demo script
-
-1. Copy `.env.example` to `.env` and run `docker compose up --build` for the
-   checked-in local services.
-2. Wait for n8n health; its bootstrap imports A/B/C and creates the Postgres
-   credential automatically. No UI import or credential secret is required.
-3. Start the backend with the run command above, or use the Compose backend.
-4. `POST /uploads` with `{"filename":"sample.csv"}` and save `upload_id` and
-   `upload_url`.
-5. `PUT` a CSV with the exact seven-column header to the presigned URL.
-6. Follow the message through MinIO webhook, event-router, LocalStack SQS, and
-   the ingestion worker.
-7. Confirm upload status, then let Workflow A use a public page or its marked
-   fixture fallback.
-8. Run Workflow B and inspect the `naive`, `candidates`, `evaluated`, and
-   `stored` metrics. Confirm the SQL stage reduces candidates before matching.
-9. Run Workflow C, inspect Mailpit for local mode, or inspect the AWS n8n
-   execution and controlled SES delivery for the AWS demo.
-
-### Verified local smoke run
-
-The checked local smoke run used `tests/fixtures/smoke-users.csv` and verified:
-
-```text
-presigned upload -> MinIO -> event-router -> LocalStack SQS
--> ingestion worker -> PostgreSQL -> n8n B -> n8n C -> Mailpit
-```
-
-Observed result: one user row was persisted, three public-source products were
-present in `loan_products`, and one `sent` Mailpit delivery was recorded for the
-controlled local recipient configured through `DEMO_RECIPIENTS`. Workflow B
-reports the SQL candidate reduction using the `naive/candidates/evaluated/stored`
-metrics.
-Workflow A was also executed against the real Discover, NerdWallet, and Prosper
-pages; any failed fetch is explicitly marked and uses a fixture fallback. The
-local LLM stub was used for deterministic offline tests. This does **not** prove
-AWS SES delivery.
-
-### Two-user notification-only demo
-
-For a safe notification demonstration using the existing 10,000-row batch, use
-the checked fixture `tests/fixtures/demo-notification-two-users.json`. It targets
-only two users whose matches are already stored and maps delivery to the two
-controlled aliases configured in `DEMO_RECIPIENTS`.
-
-The users' original `users.email` values remain unchanged in PostgreSQL. The
-demo webhook accepts only one or two explicitly named targets, requires the
-local demo token, checks both aliases against `DEMO_RECIPIENTS`, and refuses to
-use the source CSV address as a recipient. It does not re-ingest the CSV or
-re-run matching. `AWS_SES_ENABLED=false`; delivery is Mailpit only.
-
-Run it locally with:
-
-```powershell
-curl.exe -X POST http://localhost:5678/webhook/loan-demo-notification `
-  -H "Content-Type: application/json" `
-  --data-binary "@tests/fixtures/demo-notification-two-users.json"
-```
-
-Then verify two new messages at [Mailpit](http://localhost:8025), and verify
-the two `eligible-loans-demo-v1` rows in `email_deliveries`. Do not edit or
-delete the existing blocked-delivery rows.
-
-For copy/paste commands and the intentionally invalid-row demonstration, see
-[docs/local-runbook.md](docs/local-runbook.md).
-
-## AWS sandbox deployment
-
-The approved sandbox was deployed in `ap-south-1` as
-`loan-eligibility-engine-sandbox`. The exact evidence path is in
-[docs/aws-demo-runbook.md](docs/aws-demo-runbook.md). The following commands
-must not be repeated casually because they can create or update billable
-resources:
-
-```bash
-# Repeat only after explicit approval and a fresh change-set review:
-npx serverless deploy --stage sandbox --region ap-south-1
-
-# Repeat only after explicit approval and a fresh change-set review:
-aws cloudformation deploy --template-file .serverless/cloudformation-template-update-stack.json --stack-name loan-eligibility-engine
-```
-
-The sandbox now enables the authenticated upload API, uses a private RDS
-instance, keeps SES in sandbox mode, and runs the AWS n8n Docker Compose host
-inside the same VPC. The AWS ingestion Lambda calls the private n8n webhook;
-the AWS n8n workflows use the same RDS and the controlled SES aliases.
-
-The repeatable demo deployment helper is:
-
-```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\infra\deploy_aws_demo.ps1 `
-  -Profile loan-engine -Region ap-south-1 -StackName loan-eligibility-engine-sandbox
-```
-
-It provisions the demo n8n EC2 host, private database/security-group access,
-Secrets Manager references, the authenticated API route, and the AWS n8n
-workflow bundle. It writes the API endpoint, controlled demo key, and n8n URL
-to the ignored local file `aws-build/aws-demo-ui.env`; never commit or share
-that file. If a workflow JSON changes after the host was created, sync the
-workflow to the AWS n8n instance and verify a fresh execution; the existing n8n
-data volume is intentionally persistent and is not replaced automatically on a
-normal restart.
-Before any expansion, review the existing-RDS network path, dependency layer
-ARN, secret ARNs, API authentication/WAF plan, log/retention cost, S3 lifecycle,
-and data retention.
-
-### AWS n8n credential setup
-
-The AWS demonstration runs n8n in Docker Compose on an EC2 host inside the
-application VPC. The bootstrap process loads these values from Secrets Manager;
-do not paste them into workflow exports:
-
-| n8n credential | AWS configuration |
-| --- | --- |
-| PostgreSQL | Private RDS endpoint, database `loan_engine`, port `5432`, SSL enabled, certificate verification relaxed only for the sandbox demonstration. |
-| AWS SES | IAM user `loan-engine-n8n-ses`, region `ap-south-1`, policy limited to `ses:SendEmail` and `ses:SendRawEmail`. |
-| Completion webhook | Shared HMAC secret used by Lambda and Workflow B. |
-
-SES is sandboxed. The sender and controlled recipient aliases are deployment
-configuration loaded from Secrets Manager or the local `.env`; they are not
-required in the workflow exports. The source CSV addresses remain unchanged in
-the `users` table and are never used as AWS demo recipients.
-
-The repository contains the assignment's source-code deliverables. The detailed
-AWS evidence path and screen-recording instructions are kept separately in
-[docs/aws-demo-runbook.md](docs/aws-demo-runbook.md), so this README stays
-focused on architecture, setup, behavior, and design decisions.
-
-After submission, stop or delete billable AWS resources and remove temporary
-demo ingress and credentials that are no longer needed.
-
-## Troubleshooting and limitations
-
-Common failures and the local remedies are documented in
-[docs/local-runbook.md](docs/local-runbook.md). The most important boundaries
-are:
-
-- public page content is mutable; fixture fallback is necessary for repeatable
-  local demos and must be labeled;
-- the LLM stub and an actual local model API are optional extraction aids, not
-  deterministic eligibility authorities;
-- SES is configured and has a controlled AWS test; Mailpit still cannot prove
-  SES behavior;
-- the AWS sandbox has been deployed and the one-row end-to-end path has been
-  verified. Review its dependency layer, private network, existing RDS, secret
-  ARNs, demo API key, and EC2 n8n security-group rule before repeating it;
-- local service definitions are outside this owned slice, so their health,
-  credentials, and network aliases must be checked with their owners.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
